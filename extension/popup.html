@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PulseSync AI Controller</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup-shell">
+      <section class="brand">
+        <div class="mark">PS</div>
+        <div>
+          <h1>PulseSync AI</h1>
+          <p>Local Meeting Recorder</p>
+        </div>
+      </section>
+
+      <section class="status-card">
+        <div class="pulse" id="pulse"></div>
+        <div class="status-meta">
+          <span id="statusText">Idle</span>
+          <small id="roomText">Unlabeled Session</small>
+        </div>
+        <div id="timerDisplay" class="timer-display">00:00</div>
+      </section>
+
+      <div class="meter-wrapper">
+        <span class="meter-label">Audio Input Level</span>
+        <meter id="audioMeter" min="0" max="1" value="0"></meter>
+      </div>
+
+      <label class="field">
+        <span>PulseSync API Server</span>
+        <input id="tokenServerUrl" value="http://localhost:3001" placeholder="e.g. http://localhost:3001" />
+      </label>
+
+      <label class="field">
+        <span>API Access Token (required if server auth is enabled)</span>
+        <input id="apiToken" type="password" placeholder="Paste self-hosted API token" autocomplete="off" />
+      </label>
+
+      <label class="field checkbox-field">
+        <input id="consentConfirmed" type="checkbox" />
+        <span>I confirm required participant consent has been obtained for this recording.</span>
+      </label>
+
+      <label class="field">
+        <span>Meeting Title / ID</span>
+        <input id="roomName" value="Daily Sync" placeholder="e.g. Sprint Planning" />
+      </label>
+
+      <div class="actions">
+        <button id="startBtn" class="primary">Start Recording</button>
+        <button id="stopBtn" class="danger">Stop & Upload</button>
+      </div>
+
+      <button id="dashboardBtn" class="dashboard">Open Analytics Dashboard</button>
+      <p id="errorText" class="error"></p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

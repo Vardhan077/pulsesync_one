@@ -1,0 +1,16 @@
+# PulseSync AI service — local/open-source production baseline
+# Python 3.11/3.12
+fastapi==0.142.2
+uvicorn==0.54.0
+numpy>=2.4.6,<2.6
+requests==2.34.2
+faster-whisper==1.2.1
+python-dotenv>=1.0.1,<2.0
+
+# Open-source local speaker diarization — NO pyannoteAI dependency
+pyannote.audio==4.0.7
+torch==2.8.0
+torchaudio==2.8.0
+huggingface_hub>=0.28.1,<1.0
+soundfile==0.14.0
+

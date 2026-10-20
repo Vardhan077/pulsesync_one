@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "PulseSync AI",
+  "description": "Enterprise-grade AI meeting intelligence. Record tab and microphone audio locally and upload for post-call insights.",
+  "version": "1.0.0",
+  "minimum_chrome_version": "116",
+  "permissions": ["tabCapture", "storage", "offscreen", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_title": "PulseSync AI",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' http://localhost:* https://*;"
+  }
+}
