@@ -82,6 +82,22 @@ export default function ExtractionProfiles() {
   };
 
   // Load profiles and templates
+  const selectProfile = (p) => {
+    setSelectedProfileId(p.id);
+    setProfileName(p.name || "");
+    setProfileDesc(p.description || "");
+    const profileMetadata = p.profile_metadata && typeof p.profile_metadata === "object" ? p.profile_metadata : {};
+    setProfilePurpose(p.purpose || profileMetadata.purpose || p.description || "");
+    const instructions = p.extraction_instructions || profileMetadata.extraction_instructions || [];
+    setProfileInstructions(Array.isArray(instructions) ? instructions.join("\n") : String(instructions || ""));
+    setSummarySections(Array.isArray(p.summary_sections) ? p.summary_sections : []);
+    setStructuredFields(Array.isArray(p.fields) ? p.fields : []);
+    setExtractActionItems(p.extract_action_items !== false);
+    setExtractRisks(p.extract_risks !== false);
+    setExtractObjections(p.extract_objections !== false);
+    setIsActive(Boolean(p.is_active));
+  };
+
   const loadData = async () => {
     try {
       setLoading(true);
@@ -115,22 +131,6 @@ export default function ExtractionProfiles() {
   useEffect(() => {
     loadData();
   }, []);
-
-  const selectProfile = (p) => {
-    setSelectedProfileId(p.id);
-    setProfileName(p.name || "");
-    setProfileDesc(p.description || "");
-    const profileMetadata = p.profile_metadata && typeof p.profile_metadata === "object" ? p.profile_metadata : {};
-    setProfilePurpose(p.purpose || profileMetadata.purpose || p.description || "");
-    const instructions = p.extraction_instructions || profileMetadata.extraction_instructions || [];
-    setProfileInstructions(Array.isArray(instructions) ? instructions.join("\n") : String(instructions || ""));
-    setSummarySections(Array.isArray(p.summary_sections) ? p.summary_sections : []);
-    setStructuredFields(Array.isArray(p.fields) ? p.fields : []);
-    setExtractActionItems(p.extract_action_items !== false);
-    setExtractRisks(p.extract_risks !== false);
-    setExtractObjections(p.extract_objections !== false);
-    setIsActive(Boolean(p.is_active));
-  };
 
   const handleCreateFromTemplate = async (tmpl) => {
     try {

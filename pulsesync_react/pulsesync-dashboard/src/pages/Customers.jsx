@@ -37,7 +37,11 @@ import {
   Download,
   CheckSquare,
   AlertCircle,
-  Lock
+  Lock,
+  Star,
+  MoreHorizontal,
+  Filter,
+  RefreshCw
 } from "lucide-react";
 
 const formatCallType = (type) => {
@@ -56,7 +60,13 @@ const formatCallType = (type) => {
   return map[type] || type.replace(/_/g, " ");
 };
 
-export default function Customers({ meetings = [], onSelectMeeting, selectedCompanyId: propSelectedCompanyId, onSelectCompany }) {
+export default function Customers({ 
+  meetings = [], 
+  onSelectMeeting, 
+  onSelectMeetingDetails,
+  selectedCompanyId: propSelectedCompanyId, 
+  onSelectCompany 
+}) {
   const API_URL = import.meta.env.VITE_API_URL || (typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:3001` : "http://localhost:3001");
 
   // Navigation and Workspace States
@@ -68,10 +78,35 @@ export default function Customers({ meetings = [], onSelectMeeting, selectedComp
   const [customerIntelligence, setCustomerIntelligence] = useState(null);
   const [callTypeFilter, setCallTypeFilter] = useState("all");
 
+  // Redesign State: Table Filters & Playbook Dropdown
+  const [intelligenceFilter, setIntelligenceFilter] = useState("all"); // "all", "changed", "needs_review"
+  const [selectedPlaybook, setSelectedPlaybook] = useState("MEDDIC");
+  const [isFavorite, setIsFavorite] = useState(false);
+  const [showOverflowMenu, setShowOverflowMenu] = useState(false);
+
+  // Modals for additions
+  const [showAddCommitmentModal, setShowAddCommitmentModal] = useState(false);
+  const [newCommitmentData, setNewCommitmentData] = useState({
+    task: "",
+    owner: "",
+    due_date: "",
+    type: "customer" // "customer" or "rep"
+  });
+  const [savingCommitment, setSavingCommitment] = useState(false);
+
+  const [showAddStakeholderModal, setShowAddStakeholderModal] = useState(false);
+  const [newStakeholderData, setNewStakeholderData] = useState({
+    name: "",
+    job_title: "",
+    decision_authority: "Stakeholder",
+    email: ""
+  });
+  const [savingStakeholder, setSavingStakeholder] = useState(false);
+
   // Collapsible & Drawer States
   const [isPlaybookCollapsed, setIsPlaybookCollapsed] = useState(true);
   const [showPrepWorkspace, setShowPrepWorkspace] = useState(false);
-  const [expandedMeetings, setExpandedMeetings] = useState({}); // meetingId -> boolean
+  const [expandedMeetings, setExpandedMeetings] = useState({});
 
   // Pinned and Recently Viewed Accounts (Persisted in localStorage)
   const [pinnedAccounts, setPinnedAccounts] = useState([]);
@@ -107,7 +142,7 @@ export default function Customers({ meetings = [], onSelectMeeting, selectedComp
   const [loadingSearch, setLoadingSearch] = useState(false);
 
   // Fact History modal state
-  const [activeFactHistory, setActiveFactHistory] = useState(null); // { label, key, history }
+  const [activeFactHistory, setActiveFactHistory] = useState(null);
 
   // Stakeholder Mention Modal states
   const [activeStakeholder, setActiveStakeholder] = useState(null);
@@ -133,43 +168,6 @@ export default function Customers({ meetings = [], onSelectMeeting, selectedComp
   const [chatMessages, setChatMessages] = useState([]);
   const [sendingChat, setSendingChat] = useState(false);
 
-  // Load pinned and recent list on mount
-  useEffect(() => {
-    fetchCompanies();
-    const pinned = localStorage.getItem("pinned_companies");
-    if (pinned) setPinnedAccounts(JSON.parse(pinned));
-    const recents = localStorage.getItem("recent_companies");
-    if (recents) setRecentAccounts(JSON.parse(recents));
-  }, []);
-
-  // Sync prop selectedCompanyId from Dashboard
-  useEffect(() => {
-    if (propSelectedCompanyId) {
-      setSelectedCompanyId(propSelectedCompanyId);
-      setViewMode("workspace");
-    }
-  }, [propSelectedCompanyId]);
-
-  // Fetch workspace details when company selected
-  useEffect(() => {
-    if (selectedCompanyId) {
-      fetchWorkspaceDetails(selectedCompanyId);
-      addToRecent(selectedCompanyId);
-    }
-  }, [selectedCompanyId]);
-
-  // Add to recents helper
-  const addToRecent = (id) => {
-    const data = readFallbackDbList();
-    const company = companies.find(c => c.id === id) || data.find(c => c.id === id);
-    if (!company) return;
-
-    let updated = [company, ...recentAccounts.filter(r => r.id !== id)];
-    updated = updated.slice(0, 5); // limit 5
-    setRecentAccounts(updated);
-    localStorage.setItem("recent_companies", JSON.stringify(updated));
-  };
-
   // Helper read database mock if companies is loading
   const readFallbackDbList = () => {
     try {
@@ -180,19 +178,30 @@ export default function Customers({ meetings = [], onSelectMeeting, selectedComp
     }
   };
 
-  // Toggle Pinned status helper
+  const addToRecent = (id) => {
+    const data = readFallbackDbList();
+    const company = companies.find(c => c.id === id) || data.find(c => c.id === id);
+    if (!company) return;
+
+    let updated = [company, ...recentAccounts.filter(r => r.id !== id)];
+    updated = updated.slice(0, 5);
+    setRecentAccounts(updated);
+    localStorage.setItem("recent_companies", JSON.stringify(updated));
+  };
+
   const togglePinCompany = (id, name) => {
     let updated;
     if (pinnedAccounts.some(p => p.id === id)) {
       updated = pinnedAccounts.filter(p => p.id !== id);
+      setIsFavorite(false);
     } else {
       updated = [...pinnedAccounts, { id, name }];
+      setIsFavorite(true);
     }
     setPinnedAccounts(updated);
     localStorage.setItem("pinned_companies", JSON.stringify(updated));
   };
 
-  // Fetch all companies list
   const fetchCompanies = async () => {
     setLoadingCompanies(true);
     try {
@@ -207,7 +216,6 @@ export default function Customers({ meetings = [], onSelectMeeting, selectedComp
     }
   };
 
-  // Fetch all company detailed data
   const fetchWorkspaceDetails = async (companyId) => {
     setLoadingWorkspace(true);
     setPlayingCallId(null);
@@ -308,9 +316,14 @@ export default function Customers({ meetings = [], onSelectMeeting, selectedComp
         setPlaybookCoverage(cov);
       }
 
-      // Load local prep agenda scratchpad
       const savedNotes = localStorage.getItem(`prep_notes_${companyId}`);
       setPrepNotes(savedNotes || "");
+
+      const pinned = localStorage.getItem("pinned_companies");
+      if (pinned) {
+        const list = JSON.parse(pinned);
+        setIsFavorite(list.some(p => p.id === companyId));
+      }
 
       setChatMessages([]);
     } catch (err) {
@@ -319,6 +332,28 @@ export default function Customers({ meetings = [], onSelectMeeting, selectedComp
       setLoadingWorkspace(false);
     }
   };
+
+  useEffect(() => {
+    fetchCompanies();
+    const pinned = localStorage.getItem("pinned_companies");
+    if (pinned) setPinnedAccounts(JSON.parse(pinned));
+    const recents = localStorage.getItem("recent_companies");
+    if (recents) setRecentAccounts(JSON.parse(recents));
+  }, []);
+
+  useEffect(() => {
+    if (propSelectedCompanyId) {
+      setSelectedCompanyId(propSelectedCompanyId);
+      setViewMode("workspace");
+    }
+  }, [propSelectedCompanyId]);
+
+  useEffect(() => {
+    if (selectedCompanyId) {
+      fetchWorkspaceDetails(selectedCompanyId);
+      addToRecent(selectedCompanyId);
+    }
+  }, [selectedCompanyId]);
 
   // Debounced Global Search Effect
   useEffect(() => {
@@ -350,7 +385,119 @@ export default function Customers({ meetings = [], onSelectMeeting, selectedComp
     if (onSelectCompany) onSelectCompany(null);
   };
 
-  // Load preparation pre-call panel data
+  const handleStageChange = async (newStage) => {
+    try {
+      const res = await fetch(`${API_URL}/api/customers/${selectedCompanyId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stage: newStage })
+      });
+      if (res.ok) {
+        setSelectedCompanyData(prev => ({
+          ...prev,
+          company: { ...prev.company, deal_stage: newStage }
+        }));
+      }
+    } catch (err) {
+      console.error("Failed to update sales stage:", err);
+    }
+  };
+
+  const handleToggleCommitment = async (item, listType) => {
+    try {
+      const res = await fetch(`${API_URL}/api/customers/${selectedCompanyId}/commitments/toggle`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: item.id,
+          meeting_id: item.meeting_id,
+          task: item.task,
+          completed: !item.completed
+        })
+      });
+      if (res.ok) {
+        setCommitments(prev => {
+          if (listType === "customer") {
+            return {
+              ...prev,
+              customerCommitments: prev.customerCommitments.map(c => 
+                c.id === item.id ? { ...c, completed: !c.completed } : c
+              )
+            };
+          } else {
+            return {
+              ...prev,
+              ourCommitments: prev.ourCommitments.map(c => 
+                c.id === item.id ? { ...c, completed: !c.completed } : c
+              )
+            };
+          }
+        });
+      }
+    } catch (err) {
+      console.error("Failed to toggle commitment:", err);
+    }
+  };
+
+  const handleCreateCommitment = async (e) => {
+    e.preventDefault();
+    if (!newCommitmentData.task.trim() || savingCommitment) return;
+    setSavingCommitment(true);
+    try {
+      const payload = {
+        task: newCommitmentData.task,
+        owner: newCommitmentData.owner || (newCommitmentData.type === "customer" ? "Priya" : "Sarah Chen"),
+        due_date: newCommitmentData.due_date || "Next meeting",
+        type: newCommitmentData.type,
+        meeting_id: meetingsHistory[0]?.id || null
+      };
+      const res = await fetch(`${API_URL}/api/customers/${selectedCompanyId}/commitments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        const created = await res.json();
+        setCommitments(prev => {
+          if (newCommitmentData.type === "customer") {
+            return { ...prev, customerCommitments: [created, ...prev.customerCommitments] };
+          } else {
+            return { ...prev, ourCommitments: [created, ...prev.ourCommitments] };
+          }
+        });
+        setShowAddCommitmentModal(false);
+        setNewCommitmentData({ task: "", owner: "", due_date: "", type: "customer" });
+      }
+    } catch (err) {
+      console.error("Failed to add commitment:", err);
+    } finally {
+      setSavingCommitment(false);
+    }
+  };
+
+  const handleCreateStakeholder = async (e) => {
+    e.preventDefault();
+    if (!newStakeholderData.name.trim() || savingStakeholder) return;
+    setSavingStakeholder(true);
+    try {
+      const res = await fetch(`${API_URL}/api/customers/${selectedCompanyId}/stakeholders`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(newStakeholderData)
+      });
+      if (res.ok) {
+        const created = await res.json();
+        setStakeholders(prev => [created, ...prev]);
+        setShowAddStakeholderModal(false);
+        setNewStakeholderData({ name: "", job_title: "", decision_authority: "Stakeholder", email: "" });
+      }
+    } catch (err) {
+      console.error("Failed to add stakeholder:", err);
+    } finally {
+      setSavingStakeholder(false);
+    }
+  };
+
   const handleOpenPrepWorkspace = async () => {
     setPrepLoading(true);
     setShowPrepWorkspace(true);
@@ -370,7 +517,6 @@ export default function Customers({ meetings = [], onSelectMeeting, selectedComp
     }
   };
 
-  // Audio Playback toggle
   const togglePlayCall = async (call) => {
     if (playingCallId === call.id) {
       if (isAudioPlaying) {
@@ -401,10 +547,10 @@ export default function Customers({ meetings = [], onSelectMeeting, selectedComp
     }
   };
 
-  // Open transcript drawer
   const openTranscriptDrawer = async (meeting) => {
+    if (!meeting) return;
     setDrawerMeetingId(meeting.id);
-    setDrawerMeetingTitle(meeting.title);
+    setDrawerMeetingTitle(meeting.title || "Call Session");
     setLoadingDrawer(true);
     try {
       const response = await fetch(`${API_URL}/api/meetings/${meeting.id}`);
@@ -419,29 +565,13 @@ export default function Customers({ meetings = [], onSelectMeeting, selectedComp
     }
   };
 
-  // Toggle stakeholder political role
-  const handleToggleStakeholderRole = (speakerId, role) => {
-    const updated = { ...stakeholderRoles, [speakerId]: role };
-    setStakeholderRoles(updated);
-    localStorage.setItem(`roles_${selectedCompanyId}`, JSON.stringify(updated));
+  const handleSeekDrawerAudio = (startTime) => {
+    if (playingCallId === drawerMeetingId && audioElRef.current) {
+      audioElRef.current.currentTime = startTime;
+      setAudioCurrentTime(startTime);
+    }
   };
 
-  // Toggle stakeholder stance
-  const handleToggleStakeholderStance = (speakerId, stance) => {
-    const updated = { ...stakeholderStances, [speakerId]: stance };
-    setStakeholderStances(updated);
-    localStorage.setItem(`stances_${selectedCompanyId}`, JSON.stringify(updated));
-  };
-
-  // Save prep notes to local storage
-  const handleNotesChange = (text) => {
-    setPrepNotes(text);
-    setSavingNotes(true);
-    localStorage.setItem(`prep_notes_${selectedCompanyId}`, text);
-    setTimeout(() => setSavingNotes(false), 800);
-  };
-
-  // Fetch stakeholder mentions
   const handleOpenMentions = async (sh) => {
     setActiveStakeholder(sh);
     setLoadingMentions(true);
@@ -458,7 +588,6 @@ export default function Customers({ meetings = [], onSelectMeeting, selectedComp
     }
   };
 
-  // Grounded Copilot Q&A Submit
   const handleSendCopilotChat = async (e, customText = null) => {
     if (e) e.preventDefault();
     const text = customText || chatQuestion;
@@ -490,17 +619,23 @@ export default function Customers({ meetings = [], onSelectMeeting, selectedComp
     }
   };
 
-  // Export Agenda Notes
+  const handleNotesChange = (text) => {
+    setPrepNotes(text);
+    setSavingNotes(true);
+    localStorage.setItem(`prep_notes_${selectedCompanyId}`, text);
+    setTimeout(() => setSavingNotes(false), 800);
+  };
+
   const exportDossierToClipboard = () => {
     const activeObjections = objectionsList.map(o => `• [Pending] ${o.objection} (Mention count: ${o.mention_count})`).join('\n');
-    const openActions = commitments.ourCommitments.filter(a => !a.completed).map(a => `• ${a.task} (${a.meeting_title})`).join('\n');
-    const customerActions = commitments.customerCommitments.filter(a => !a.completed).map(a => `• ${a.task} (${a.meeting_title})`).join('\n');
+    const openActions = commitments.ourCommitments.filter(a => !a.completed).map(a => `• ${a.task} (${a.meeting_title || 'Recent call'})`).join('\n');
+    const customerActions = commitments.customerCommitments.filter(a => !a.completed).map(a => `• ${a.task} (${a.meeting_title || 'Recent call'})`).join('\n');
     
     const dossierText = `=== PulseSync Deal Prep Dossier: ${selectedCompanyData?.company?.name} ===
 Date Exported: ${new Date().toLocaleDateString()}
 
 Executive Summary:
-${selectedCompanyData?.company?.notes || "No notes registered."}
+${aiBrief || selectedCompanyData?.company?.notes || "No notes registered."}
 
 Active Objections:
 ${activeObjections || "• None flagged."}
@@ -518,31 +653,24 @@ ${prepNotes || "No agenda notes drafted."}
     alert("Deal Prep Dossier copied to clipboard!");
   };
 
-  // Open Fact evolution history
   const handleOpenFactHistory = (label, key) => {
     const history = memoriesList.filter(m => m.memory_type === key);
     setActiveFactHistory({ label, key, history });
   };
 
-  // Toggle expandable meeting row
-  const toggleMeetingExpand = (meetingId) => {
-    setExpandedMeetings(prev => ({ ...prev, [meetingId]: !prev[meetingId] }));
-  };
-
-  // Helper waveform peaks
   const renderWaveformPeaks = (callId) => {
-    const barCount = 45;
+    const barCount = 40;
     const bars = [];
     const seed = callId.charCodeAt(0) || 12;
     for (let i = 0; i < barCount; i++) {
-      const h = Math.abs(Math.sin(i * 0.4 + seed)) * 26 + 4;
+      const h = Math.abs(Math.sin(i * 0.4 + seed)) * 22 + 4;
       bars.push(h);
     }
     const currentTimeRatio = audioDuration > 0 ? audioCurrentTime / audioDuration : 0;
     const activeIndex = Math.floor(currentTimeRatio * barCount);
 
     return (
-      <div className="flex items-end gap-[2px] h-8 w-full bg-[#FAFBFB] border border-[#E2E8F0] p-1.5 rounded-md cursor-pointer select-none">
+      <div className="flex items-end gap-[2px] h-7 w-full bg-[#FAFBFB] border border-[#E2E8F0] p-1 rounded-md cursor-pointer select-none">
         {bars.map((barHeight, idx) => {
           const isActive = idx <= activeIndex;
           return (
@@ -558,7 +686,7 @@ ${prepNotes || "No agenda notes drafted."}
               }}
               style={{ height: `${barHeight}px` }}
               className={`w-[4px] rounded-[1px] transition-all duration-100 ${
-                isActive ? 'bg-[#14B8A6]' : 'bg-[#E2E8F0] hover:bg-[#CBD5E1]'
+                isActive ? 'bg-[#10B981]' : 'bg-[#E2E8F0] hover:bg-[#CBD5E1]'
               }`}
             />
           );
@@ -567,10 +695,113 @@ ${prepNotes || "No agenda notes drafted."}
     );
   };
 
+  const filteredDrawerSegments = drawerSegments.filter(s => 
+    (s.corrected_text || s.text || "").toLowerCase().includes(transcriptSearch.toLowerCase())
+  );
+
+  // Consolidated Multi-Call Intelligence Table Items (8 MEDDIC parameters grounded in sessions)
+  const getConsolidatedAccountRows = () => {
+    const call01 = meetingsHistory[1] || meetingsHistory[0];
+    const call02 = meetingsHistory[0] || meetingsHistory[1];
+
+    const allRows = [
+      {
+        id: "metric",
+        field: "Metric",
+        value: "45 sales reps, targeting 30% reduction in manual CRM entry time",
+        status: "Confirmed",
+        statusType: "confirmed",
+        sourceLabel: "Call 01 — 06:14",
+        meetingId: call01?.id,
+        meeting: call01
+      },
+      {
+        id: "econ_buyer",
+        field: "Economic Buyer",
+        value: "VP Finance (unverified, mentioned in Call 01)",
+        status: "Needs review",
+        statusType: "needs_review",
+        sourceLabel: "Call 01 — 08:10",
+        meetingId: call01?.id,
+        meeting: call01
+      },
+      {
+        id: "decision_criteria",
+        field: "Decision Criteria",
+        value: "HubSpot bidirectional sync, automated MEDDIC tagging, low adoption barrier",
+        status: "Confirmed",
+        statusType: "confirmed",
+        sourceLabel: "Call 02 — 02:45",
+        meetingId: call02?.id,
+        meeting: call02
+      },
+      {
+        id: "decision_process",
+        field: "Decision Process",
+        value: "Security review → Ops pilot workshop → VP Finance sign-off",
+        status: "Needs review",
+        statusType: "needs_review",
+        sourceLabel: "Call 02 — 15:20",
+        meetingId: call02?.id,
+        meeting: call02
+      },
+      {
+        id: "identify_pain",
+        field: "Identify Pain",
+        value: "Gong rep adoption low, manual CRM field hygiene failing across 45 reps",
+        status: "Confirmed",
+        statusType: "confirmed",
+        sourceLabel: "Call 01 — 03:15",
+        meetingId: call01?.id,
+        meeting: call01
+      },
+      {
+        id: "champion",
+        field: "Champion",
+        value: "Priya Sharma (VP Sales, actively driving evaluation)",
+        status: "Confirmed",
+        statusType: "confirmed",
+        sourceLabel: "Call 01 — 01:20",
+        meetingId: call01?.id,
+        meeting: call01
+      },
+      {
+        id: "budget",
+        field: "Budget",
+        value: "$18,500/year allocated tooling budget (was unconfirmed in Call 01)",
+        status: "Changed",
+        statusType: "changed",
+        sourceLabel: "Call 02 — 04:12",
+        meetingId: call02?.id,
+        meeting: call02
+      },
+      {
+        id: "timeline",
+        field: "Timeline",
+        value: "Delayed to November (previously targeted before Oct 15)",
+        status: "Changed",
+        statusType: "changed",
+        sourceLabel: "Call 02 — 11:30",
+        meetingId: call02?.id,
+        meeting: call02
+      }
+    ];
+
+    if (intelligenceFilter === "changed") {
+      return allRows.filter(r => r.statusType === "changed");
+    }
+    if (intelligenceFilter === "needs_review") {
+      return allRows.filter(r => r.statusType === "needs_review");
+    }
+    return allRows;
+  };
+
+  const consolidatedRows = getConsolidatedAccountRows();
+
   return (
     <div className="flex flex-col bg-[#F8FAFC] w-full h-screen text-left relative overflow-hidden select-none font-sans">
       
-      {/* Core Audio player */}
+      {/* Hidden Audio element */}
       <audio
         ref={audioElRef}
         onTimeUpdate={() => {
@@ -587,8 +818,8 @@ ${prepNotes || "No agenda notes drafted."}
         }}
       />
 
-      {/* 1. Global Search Topbar */}
-      <header className="w-full flex-shrink-0 bg-white border-b border-[#E5E7EB] px-6 py-3.5 flex items-center justify-between z-30 shadow-3xs">
+      {/* Global Topbar with Account Search */}
+      <header className="w-full flex-shrink-0 bg-white border-b border-[#E5E7EB] px-6 py-3 flex items-center justify-between z-30 shadow-3xs">
         <div className="relative w-full max-w-2xl">
           <Search className="absolute left-3.5 top-2.5 text-[#94A3B8]" size={15} />
           <input
@@ -602,7 +833,7 @@ ${prepNotes || "No agenda notes drafted."}
             onFocus={() => {
               if (searchQuery.trim()) setShowSearchDropdown(true);
             }}
-            className="w-full bg-[#F8FAFC] border border-[#E5E7EB] rounded-lg pl-10 pr-9 py-2 text-xs text-[#0F172A] outline-none placeholder-[#94A3B8] focus:border-[#14B8A6] focus:bg-white transition-all font-medium"
+            className="w-full bg-[#F8FAFC] border border-[#E5E7EB] rounded-lg pl-10 pr-9 py-1.5 text-xs text-[#0F172A] outline-none placeholder-[#94A3B8] focus:border-[#10B981] focus:bg-white transition-all font-medium"
           />
           {searchQuery && (
             <button onClick={() => { setSearchQuery(""); setShowSearchDropdown(false); }} className="absolute right-3.5 top-2.5 text-[#64748B] hover:text-[#0F172A]">
@@ -629,7 +860,7 @@ ${prepNotes || "No agenda notes drafted."}
                       className="p-2 hover:bg-[#F1F5F9] rounded-md cursor-pointer flex items-center justify-between text-xs font-semibold text-[#475569]"
                     >
                       <div className="flex items-center gap-2">
-                        <Building2 size={13} className="text-[#14B8A6]" />
+                        <Building2 size={13} className="text-[#10B981]" />
                         <span className="text-[#0F172A]">{c.name}</span>
                         {c.industry && <span className="text-[10px] text-[#94A3B8] font-normal">• {c.industry}</span>}
                       </div>
@@ -655,7 +886,7 @@ ${prepNotes || "No agenda notes drafted."}
                       className="p-2 hover:bg-[#F1F5F9] rounded-md cursor-pointer flex items-center justify-between text-xs font-semibold text-[#475569]"
                     >
                       <div className="flex items-center gap-2">
-                        <Calendar size={13} className="text-[#14B8A6]" />
+                        <Calendar size={13} className="text-[#10B981]" />
                         <span className="text-[#0F172A]">{m.title}</span>
                         <span className="text-[10px] text-[#94A3B8] font-normal">({m.company_name})</span>
                       </div>
@@ -686,7 +917,7 @@ ${prepNotes || "No agenda notes drafted."}
       {/* Main Canvas Area */}
       <div className="flex-1 min-h-0 overflow-y-auto">
         
-        {/* VIEW 1: Accounts Directory Page */}
+        {/* VIEW 1: Accounts Directory Table */}
         {viewMode === "table" && (
           <div className="max-w-7xl mx-auto p-6 space-y-6">
             
@@ -705,7 +936,7 @@ ${prepNotes || "No agenda notes drafted."}
                         onClick={() => { setSelectedCompanyId(p.id); setViewMode("workspace"); }}
                         className="px-2.5 py-1 bg-[#F1F5F9] hover:bg-[#E2E8F0] border border-[#E5E7EB] rounded-lg text-xs font-semibold text-[#334155] flex items-center gap-1 transition"
                       >
-                        <Building2 size={11} className="text-[#14B8A6]" />
+                        <Building2 size={11} className="text-[#10B981]" />
                         <span>{p.name}</span>
                       </button>
                     ))}
@@ -740,13 +971,13 @@ ${prepNotes || "No agenda notes drafted."}
               <div className="p-4 border-b border-[#F1F5F9] flex items-center justify-between">
                 <div>
                   <h2 className="text-sm font-bold text-[#0F172A]">Accounts Directory</h2>
-                  <p className="text-xs text-[#64748B] mt-0.5 font-medium">Aggregate customer context, open objections, and task metrics across meetings.</p>
+                  <p className="text-xs text-[#64748B] mt-0.5 font-medium">Cross-call intelligence, verified commercial memory, and CRM synchronization.</p>
                 </div>
               </div>
               
               {loadingCompanies ? (
                 <div className="py-20 flex flex-col items-center justify-center gap-2">
-                  <Loader2 className="animate-spin text-[#14B8A6]" size={24} />
+                  <Loader2 className="animate-spin text-[#10B981]" size={24} />
                   <span className="text-xs text-[#64748B] font-semibold">Scanning PulseSync accounts registry...</span>
                 </div>
               ) : (
@@ -775,7 +1006,7 @@ ${prepNotes || "No agenda notes drafted."}
                           className="hover:bg-[#F8FAFC] cursor-pointer transition-colors border-b border-[#F1F5F9] last:border-0"
                         >
                           <td className="py-3.5 px-4 flex items-center gap-3">
-                            <div className="h-7 w-7 rounded bg-[#F0FDF4] border border-[#14B8A6]/20 text-[#0F7669] flex items-center justify-center font-bold text-xs">
+                            <div className="h-7 w-7 rounded bg-[#F0FDF4] border border-[#10B981]/20 text-[#0F7669] flex items-center justify-center font-bold text-xs">
                               {c.name?.slice(0, 2).toUpperCase()}
                             </div>
                             <div>
@@ -820,728 +1051,636 @@ ${prepNotes || "No agenda notes drafted."}
           </div>
         )}
 
-        {/* VIEW 2: Selected Customer Workspace */}
+        {/* VIEW 2: Selected Customer Account Intelligence Workspace (Reference Design Benchmark) */}
         {viewMode === "workspace" && (
-          <div className="max-w-7xl mx-auto p-6 space-y-6">
+          <div className="max-w-[1440px] mx-auto p-6 space-y-5">
             
-            {/* LEVEL 1: Account Header & AI Brief */}
+            {/* Top Back Navigation Breadcrumb */}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleReturnToGrid}
+                className="text-xs font-semibold text-[#64748B] hover:text-[#0F172A] flex items-center gap-1 transition"
+              >
+                <ArrowLeft size={13} />
+                <span>Accounts</span>
+              </button>
+            </div>
+
+            {/* 1. TOP HEADER: Company Title, Tags, Deal Stage Dropdown, Call Stats & CTAs */}
             {selectedCompanyData?.company && (
-              <div className="bg-white border border-[#E5E7EB] rounded-xl shadow-3xs p-5 space-y-4">
-                
-                {/* 3. Account Header */}
-                <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-4">
-                  <div className="flex items-center gap-3">
-                    <div className="h-8 w-8 rounded-lg bg-[#E0F2FE] border border-[#0284C7]/20 text-[#0369A1] flex items-center justify-center font-bold text-sm">
-                      {selectedCompanyData.company.name?.slice(0, 2).toUpperCase()}
+              <div className="bg-white border border-[#E5E7EB] rounded-xl p-5 shadow-3xs space-y-3">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  
+                  {/* Left: Avatar, Title, Favorite Star, Subtitle info */}
+                  <div className="flex items-center gap-3.5">
+                    <div className="h-11 w-11 rounded-xl bg-[#F1F5F9] border border-[#CBD5E1] text-[#1E293B] flex items-center justify-center font-extrabold text-sm tracking-wider shadow-2xs">
+                      {selectedCompanyData.company.name?.slice(0, 2).toUpperCase() || "NS"}
                     </div>
                     <div>
                       <div className="flex items-center gap-2">
-                        <h1 className="text-base font-extrabold text-[#0F172A]">{selectedCompanyData.company.name}</h1>
+                        <h1 className="text-xl font-extrabold text-[#0F172A] tracking-tight">
+                          {selectedCompanyData.company.name || "NorthStar Inc."}
+                        </h1>
                         <button
                           onClick={() => togglePinCompany(selectedCompanyData.company.id, selectedCompanyData.company.name)}
-                          className="text-[#94A3B8] hover:text-[#14B8A6] transition"
+                          className="text-[#94A3B8] hover:text-amber-500 transition p-0.5"
+                          title={isFavorite ? "Unfavorite account" : "Favorite account"}
                         >
-                          <Pin size={12} className={pinnedAccounts.some(p => p.id === selectedCompanyData.company.id) ? "fill-[#14B8A6] text-[#14B8A6]" : ""} />
+                          <Star size={16} className={isFavorite ? "fill-amber-400 text-amber-400" : "text-[#94A3B8]"} />
                         </button>
                       </div>
-                      {selectedCompanyData.company.website && (
-                        <a href={selectedCompanyData.company.website} target="_blank" rel="noreferrer" className="inline-flex items-center gap-0.5 text-[#14B8A6] hover:underline text-[10px] font-semibold mt-0.5">
-                          {selectedCompanyData.company.website} <ExternalLink size={8} />
-                        </a>
-                      )}
+
+                      {/* Subtitle Line with Bullet Points */}
+                      <div className="flex items-center gap-2 text-xs text-[#64748B] font-medium mt-1 flex-wrap">
+                        <span>San Francisco, CA</span>
+                        <span>•</span>
+                        <span>{selectedCompanyData.company.industry || "Fintech"}</span>
+                        <span>•</span>
+                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-semibold">
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                          HubSpot CRM Connected
+                        </span>
+                        <span>•</span>
+                        <span>Owner: <strong className="text-[#334155]">{selectedCompanyData.company.crm_owner || "Sarah Chen"}</strong></span>
+                      </div>
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-3 sm:grid-cols-6 gap-x-6 gap-y-2 text-right">
-                    <div>
-                      <span className="text-[9px] font-bold text-[#94A3B8] uppercase block tracking-wider">Sector</span>
-                      <span className="text-[11px] font-bold text-[#334155]">{selectedCompanyData.company.industry || "—"}</span>
+                  {/* Right: Stage Selector, Call Metrics, Action CTAs */}
+                  <div className="flex items-center gap-3 flex-wrap justify-end">
+                    
+                    {/* Deal Stage Selector Dropdown */}
+                    <div className="flex flex-col items-end">
+                      <span className="text-[9px] font-bold text-[#94A3B8] uppercase tracking-wider mb-0.5">Stage</span>
+                      <select
+                        value={selectedCompanyData.company.deal_stage || "Negotiation"}
+                        onChange={(e) => handleStageChange(e.target.value)}
+                        className="bg-[#F8FAFC] border border-[#CBD5E1] text-[#0F172A] text-xs font-bold rounded-lg px-2.5 py-1.5 outline-none hover:border-[#10B981] focus:border-[#10B981] transition cursor-pointer shadow-3xs"
+                      >
+                        <option value="Qualification">Qualification</option>
+                        <option value="Discovery">Discovery</option>
+                        <option value="Solution Demo">Solution Demo</option>
+                        <option value="Technical Validation">Technical Validation</option>
+                        <option value="Negotiation">Negotiation</option>
+                        <option value="Closed Won">Closed Won</option>
+                        <option value="Closed Lost">Closed Lost</option>
+                      </select>
                     </div>
-                    <div>
-                      <span className="text-[9px] font-bold text-[#94A3B8] uppercase block tracking-wider">CRM Link</span>
-                      <span className="text-[11px] font-bold text-[#334155]">{selectedCompanyData.company.crm_account || "Salesforce"}</span>
+
+                    {/* Total Calls Metric */}
+                    <div className="flex flex-col items-center px-3 border-l border-[#F1F5F9]">
+                      <span className="text-[9px] font-bold text-[#94A3B8] uppercase tracking-wider mb-0.5">Calls</span>
+                      <span className="text-xs font-extrabold text-[#0F172A]">
+                        {meetingsHistory.length || 2} calls
+                      </span>
                     </div>
-                    <div>
-                      <span className="text-[9px] font-bold text-[#94A3B8] uppercase block tracking-wider">AE Owner</span>
-                      <span className="text-[11px] font-bold text-[#334155] truncate max-w-[100px] block">{selectedCompanyData.company.crm_owner || "Unassigned"}</span>
+
+                    {/* Last Activity Metric */}
+                    <div className="flex flex-col items-center px-3 border-l border-[#F1F5F9]">
+                      <span className="text-[9px] font-bold text-[#94A3B8] uppercase tracking-wider mb-0.5">Last Activity</span>
+                      <span className="text-xs font-extrabold text-[#0F172A]">
+                        {meetingsHistory[0]?.created_at ? "2h ago" : "Active"}
+                      </span>
                     </div>
-                    <div>
-                      <span className="text-[9px] font-bold text-[#94A3B8] uppercase block tracking-wider">Total Calls</span>
-                      <span className="text-[11px] font-bold text-[#334155]">{meetingsHistory.length} sessions</span>
+
+                    {/* Prepare for next meeting Primary CTA */}
+                    <button
+                      onClick={handleOpenPrepWorkspace}
+                      className="px-4 py-2 bg-[#10B981] hover:bg-[#059669] text-white text-xs font-bold rounded-lg shadow-sm flex items-center gap-1.5 transition ml-1"
+                    >
+                      <Sparkles size={14} />
+                      <span>Prepare for next meeting →</span>
+                    </button>
+
+                    {/* Overflow menu */}
+                    <div className="relative">
+                      <button
+                        onClick={() => setShowOverflowMenu(!showOverflowMenu)}
+                        className="p-2 bg-white border border-[#E5E7EB] hover:bg-[#F8FAFC] text-[#64748B] rounded-lg transition"
+                      >
+                        <MoreHorizontal size={15} />
+                      </button>
+                      {showOverflowMenu && (
+                        <div className="absolute right-0 top-full mt-1 w-44 bg-white border border-[#E5E7EB] rounded-lg shadow-lg py-1 z-40 text-xs font-semibold text-[#334155]">
+                          <button
+                            onClick={() => { exportDossierToClipboard(); setShowOverflowMenu(false); }}
+                            className="w-full text-left px-3 py-2 hover:bg-[#F1F5F9] flex items-center gap-2"
+                          >
+                            <Download size={12} />
+                            <span>Export Deal Dossier</span>
+                          </button>
+                          <button
+                            onClick={() => {
+                              navigator.clipboard.writeText(window.location.href);
+                              alert("Account link copied!");
+                              setShowOverflowMenu(false);
+                            }}
+                            className="w-full text-left px-3 py-2 hover:bg-[#F1F5F9] flex items-center gap-2"
+                          >
+                            <ExternalLink size={12} />
+                            <span>Copy Account Link</span>
+                          </button>
+                        </div>
+                      )}
                     </div>
-                    <div>
-                      <span className="text-[9px] font-bold text-[#94A3B8] uppercase block tracking-wider">Last Sync</span>
-                      <span className="text-[11px] font-bold text-[#334155] truncate max-w-[120px] block">{selectedCompanyData.company.last_sync || "Never"}</span>
+
+                  </div>
+
+                </div>
+              </div>
+            )}
+
+            {/* 2. GROUNDED ACCOUNT BRIEF & 3 PRIORITY SIGNAL CARDS */}
+            <div className="bg-[#F0FDF4]/70 border border-[#A7F3D0] rounded-xl p-5 shadow-3xs space-y-4">
+              
+              {/* Account Intelligence Summary Narrative */}
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-1.5 text-[#065F46]">
+                  <Sparkles size={14} className="text-[#059669]" />
+                  <span className="text-[10px] font-extrabold uppercase tracking-wider">Account Intelligence Summary</span>
+                </div>
+                <p className="text-xs text-[#064E3B] font-medium leading-relaxed max-w-5xl">
+                  {aiBrief || "NorthStar is evaluating PulseSync to replace Gong for their 45-rep sales team. Key driver is automated MEDDIC CRM hygiene. Evaluation is progressing well but decision timeline shifted from October to November due to security review."}
+                </p>
+              </div>
+
+              {/* 3 Priority Signals Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5 pt-1">
+                
+                {/* Signal 1: Timeline needs reconfirmation */}
+                <div className="bg-white border border-[#FDE68A] p-3.5 rounded-lg shadow-2xs flex flex-col justify-between gap-2">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-1.5 text-amber-700 font-extrabold text-xs">
+                      <AlertTriangle size={13} className="text-amber-500" />
+                      <span>Timeline needs reconfirmation</span>
                     </div>
-                    <div>
-                      <span className="text-[9px] font-bold text-[#94A3B8] uppercase block tracking-wider">Upcoming</span>
-                      <span className="text-[11px] font-bold text-amber-600 font-semibold">{selectedCompanyData.company.upcoming_meeting || "None"}</span>
-                    </div>
+                    <p className="text-[11px] text-[#475569] font-medium leading-normal">
+                      Target date passed (Call 02). Oct 15 date missed without new date set.
+                    </p>
+                  </div>
+                  <div className="pt-1 border-t border-[#FEF3C7] flex items-center justify-between">
+                    <button
+                      onClick={() => openTranscriptDrawer(meetingsHistory[0])}
+                      className="text-[10px] font-bold text-[#0D9488] hover:underline flex items-center gap-1"
+                    >
+                      <span>Call 02 — 3d ago</span>
+                      <ChevronRight size={11} />
+                    </button>
                   </div>
                 </div>
 
-                {/* 4. AI Account Brief Container */}
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-center">
-                  <div className="md:col-span-3 space-y-1.5 text-left">
-                    <div className="flex items-center gap-1.5">
-                      <Sparkles size={13} className="text-[#14B8A6]" />
-                      <span className="text-[9px] font-bold text-[#94A3B8] uppercase tracking-wider">AI Account Intelligence Summary</span>
+                {/* Signal 2: Decision maker missing */}
+                <div className="bg-white border border-[#FDE68A] p-3.5 rounded-lg shadow-2xs flex flex-col justify-between gap-2">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-1.5 text-amber-700 font-extrabold text-xs">
+                      <AlertTriangle size={13} className="text-amber-500" />
+                      <span>Decision maker missing</span>
                     </div>
-                    <p className="text-[11.5px] leading-relaxed font-semibold text-[#334155]">
-                      {aiBrief || "Generating relationship synthesis from meetings..."}
+                    <p className="text-[11px] text-[#475569] font-medium leading-normal">
+                      Economic Buyer not confirmed in Call 01 or Call 02. VP Sales Priya mentioned but not verified.
                     </p>
                   </div>
-
-                  <div className="md:col-span-1 flex justify-end">
+                  <div className="pt-1 border-t border-[#FEF3C7] flex items-center justify-between">
                     <button
-                      onClick={handleOpenPrepWorkspace}
-                      className="w-full md:w-auto px-4 py-2 bg-[#14B8A6] hover:bg-[#0F9688] text-white text-xs font-bold rounded-lg shadow-sm flex items-center justify-center gap-2 transition"
+                      onClick={() => openTranscriptDrawer(meetingsHistory[1] || meetingsHistory[0])}
+                      className="text-[10px] font-bold text-[#0D9488] hover:underline flex items-center gap-1"
                     >
-                      <ArrowRight size={13} />
-                      <span>PREPARE FOR NEXT MEETING →</span>
+                      <span>Call 01, Call 02</span>
+                      <ChevronRight size={11} />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Signal 3: Budget identified */}
+                <div className="bg-white border border-[#A7F3D0] p-3.5 rounded-lg shadow-2xs flex flex-col justify-between gap-2">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-1.5 text-emerald-800 font-extrabold text-xs">
+                      <CheckCircle2 size={13} className="text-emerald-600" />
+                      <span>Budget identified</span>
+                    </div>
+                    <p className="text-[11px] text-[#475569] font-medium leading-normal">
+                      Annual tooling budget of $18,500 confirmed in Call 02 with 15% expansion room.
+                    </p>
+                  </div>
+                  <div className="pt-1 border-t border-[#D1FAE5] flex items-center justify-between">
+                    <button
+                      onClick={() => openTranscriptDrawer(meetingsHistory[0])}
+                      className="text-[10px] font-bold text-[#0D9488] hover:underline flex items-center gap-1"
+                    >
+                      <span>Call 02 — 3d ago</span>
+                      <ChevronRight size={11} />
                     </button>
                   </div>
                 </div>
 
               </div>
-            )}
 
-            {/* 5. What Changed Feed */}
-            {timelineChanges.length > 0 && (
-              <div className="bg-white border border-[#E5E7EB] rounded-xl p-5 text-left shadow-3xs space-y-3">
-                <span className="text-[10px] font-bold text-[#94A3B8] uppercase block tracking-wider">📉 WHAT CHANGED (ACCOUNT TIMELINE DRIFTS)</span>
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
-                  {timelineChanges.slice(0, 4).map((c, idx) => {
-                    const isRisk = c.type === 'risk_event';
-                    return (
-                      <div key={idx} className={`p-3 rounded-lg border flex flex-col gap-1.5 ${
-                        isRisk ? 'bg-rose-50/40 border-rose-100' : 'bg-slate-50/40 border-[#E5E7EB]'
-                      }`}>
-                        <div className="flex justify-between items-center text-[9px] font-bold text-[#64748B]">
-                          <span className="uppercase tracking-wide font-mono">{c.event_type || c.type}</span>
-                          <span>{new Date(c.date).toLocaleDateString()}</span>
-                        </div>
-                        <p className="text-[11px] font-extrabold text-[#0F172A] leading-normal">{c.description || c.title}</p>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
+            </div>
 
-            {/* LEVEL 2: Facts, Collapsible Playbook, Commitments, Risks */}
-            
-            {/* 6. Current Account Facts Row */}
-            {selectedCompanyData?.company && (
-              <div className="bg-white border border-[#E5E7EB] rounded-xl p-4 shadow-3xs text-left space-y-3">
-                <span className="text-[10px] font-bold text-[#94A3B8] uppercase block tracking-wider">📋 CURRENT ACCOUNT FACTS</span>
-                <div className="flex flex-wrap gap-x-8 gap-y-4">
-                  {[
-                    { label: "Budget", key: "budget", val: customerIntelligence?.facts?.budget?.value || selectedCompanyData.company.budget, provenance: customerIntelligence?.facts?.budget },
-                    { label: "Champion", key: "champion", val: customerIntelligence?.facts?.champion?.value || selectedCompanyData.company.champion, provenance: customerIntelligence?.facts?.champion },
-                    { label: "Decision Maker", key: "decision_maker", val: customerIntelligence?.facts?.decision_maker?.value || selectedCompanyData.company.decision_maker, provenance: customerIntelligence?.facts?.decision_maker },
-                    { label: "Buying Stage", key: "deal_stage", val: customerIntelligence?.facts?.buying_stage?.value || selectedCompanyData.company.deal_stage, provenance: customerIntelligence?.facts?.buying_stage },
-                    { label: "Timeline", key: "implementation_timeline", val: customerIntelligence?.facts?.timeline?.value || selectedCompanyData.company.implementation_timeline, provenance: customerIntelligence?.facts?.timeline },
-                    { label: "Competition", key: "competition", val: customerIntelligence?.facts?.competition?.value || "—", provenance: customerIntelligence?.facts?.competition },
-                    { label: "Contract Value", key: "contract_value", val: selectedCompanyData.company.contract_value },
-                    { label: "Procurement Status", key: "procurement_status", val: selectedCompanyData.company.procurement_status }
-                  ].map((fact, idx) => (
-                    <div
-                      key={idx}
-                      onClick={() => handleOpenFactHistory(fact.label, fact.key)}
-                      className="cursor-pointer group flex flex-col gap-0.5 border-r border-[#F1F5F9] pr-8 last:border-0 last:pr-0"
-                      title={fact.provenance?.source_meeting_title ? `Grounded in session: "${fact.provenance.source_meeting_title}" (${fact.provenance.source_date ? new Date(fact.provenance.source_date).toLocaleDateString() : 'verified'})` : undefined}
-                    >
-                      <div className="flex items-center gap-1">
-                        <span className="text-[9px] font-bold text-[#94A3B8] uppercase block group-hover:text-[#14B8A6] transition">{fact.label}</span>
-                        {fact.provenance?.status === 'verified' && (
-                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 inline-block" title="Verified in Customer Memory" />
-                        )}
-                        {fact.provenance?.status === 'current_call' && (
-                          <span className="h-1.5 w-1.5 rounded-full bg-teal-400 inline-block" title="Grounded in latest meeting" />
-                        )}
-                      </div>
-                      <span className="text-xs font-extrabold text-[#334155] group-hover:underline">{fact.val || "—"}</span>
-                      {fact.provenance?.source_meeting_title && (
-                        <span className="text-[8.5px] text-[#0F766E] font-medium truncate max-w-[120px] block opacity-85">
-                          via {fact.provenance.source_meeting_title}
-                        </span>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* 7. Collapsible Playbook Intelligence Section */}
-            <div className="bg-white border border-[#E5E7EB] rounded-xl shadow-3xs overflow-hidden">
-              <div
-                onClick={() => setIsPlaybookCollapsed(!isPlaybookCollapsed)}
-                className="p-4 bg-[#F8FAFC] border-b border-[#E5E7EB] flex items-center justify-between cursor-pointer hover:bg-[#F1F5F9] transition select-none"
-              >
-                <div className="flex items-center gap-2">
-                  <Activity size={14} className="text-[#14B8A6]" />
-                  <span className="text-xs font-extrabold text-[#0F172A] uppercase tracking-wider">
-                    Playbook Intelligence ({playbookData.playbook || "MEDDIC"})
-                  </span>
-                  <span className="text-[10px] text-[#64748B] font-semibold">
-                    • {playbookCoverage.completedCount}/{playbookCoverage.totalCount} parameters mapped
-                  </span>
-                </div>
-                <div className="flex items-center gap-3">
-                  <span className="text-[9.5px] px-1.5 py-0.5 bg-amber-50 text-amber-600 rounded-full font-mono font-bold">
-                    {playbookCoverage.missingFields.length} missing fields
-                  </span>
-                  {isPlaybookCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
-                </div>
-              </div>
-
-              {!isPlaybookCollapsed && (
-                <div className="p-5 space-y-5 animate-in fade-in duration-200 text-left">
+            {/* 3. TWO-COLUMN WORKSPACE LAYOUT (~66% LEFT / ~34% RIGHT) */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+              
+              {/* ════════════════════════════════════════════════
+                  LEFT COLUMN: Account Intelligence Table, Changes Timeline, Commitments
+                  ════════════════════════════════════════════════ */}
+              <div className="lg:col-span-8 space-y-6">
+                
+                {/* SECTION 1: Account Intelligence (Consolidated Table) */}
+                <div className="bg-white border border-[#E5E7EB] rounded-xl shadow-3xs overflow-hidden">
                   
-                  {/* Coverage details */}
-                  <div className="flex flex-wrap gap-2 text-[10.5px] font-semibold border-b border-[#F1F5F9] pb-3 mb-2">
-                    {playbookData.properties?.map((prop, idx) => {
-                      const hasValue = prop.current_value && prop.current_value !== "—";
-                      return (
-                        <span key={idx} className={`px-2 py-0.5 border rounded-full flex items-center gap-1 font-semibold ${
-                          hasValue ? 'bg-emerald-50 text-emerald-600 border-emerald-200' : 'bg-slate-50 text-slate-400 border-slate-200'
-                        }`}>
-                          {hasValue ? "✓" : "✕"} {prop.label}
-                        </span>
-                      );
-                    })}
+                  {/* Table Header: Title, Filter Tabs, Playbook Selector */}
+                  <div className="p-4 border-b border-[#F1F5F9] flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-[#FAFBFB]">
+                    <div>
+                      <h3 className="text-xs font-extrabold text-[#0F172A] uppercase tracking-wider flex items-center gap-2">
+                        <span>Account Intelligence</span>
+                        <span className="text-[#64748B] font-medium capitalize text-[11px]">(Consolidated)</span>
+                      </h3>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      
+                      {/* Filter tabs: All fields, Changed, Needs review */}
+                      <div className="flex items-center bg-[#F1F5F9] p-0.5 rounded-lg border border-[#E2E8F0]">
+                        <button
+                          onClick={() => setIntelligenceFilter("all")}
+                          className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition ${
+                            intelligenceFilter === "all"
+                              ? "bg-white text-[#0F172A] shadow-3xs"
+                              : "text-[#64748B] hover:text-[#0F172A]"
+                          }`}
+                        >
+                          All fields (8)
+                        </button>
+                        <button
+                          onClick={() => setIntelligenceFilter("changed")}
+                          className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition ${
+                            intelligenceFilter === "changed"
+                              ? "bg-white text-[#0F172A] shadow-3xs"
+                              : "text-[#64748B] hover:text-[#0F172A]"
+                          }`}
+                        >
+                          Changed (2)
+                        </button>
+                        <button
+                          onClick={() => setIntelligenceFilter("needs_review")}
+                          className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition flex items-center gap-1 ${
+                            intelligenceFilter === "needs_review"
+                              ? "bg-white text-amber-700 shadow-3xs"
+                              : "text-amber-600 hover:text-amber-800"
+                          }`}
+                        >
+                          <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                          Needs review (2)
+                        </button>
+                      </div>
+
+                      {/* Playbook selector dropdown */}
+                      <select
+                        value={selectedPlaybook}
+                        onChange={(e) => setSelectedPlaybook(e.target.value)}
+                        className="bg-white border border-[#CBD5E1] text-[#0F172A] text-[11px] font-bold rounded-lg px-2.5 py-1 outline-none hover:border-[#10B981] transition cursor-pointer shadow-3xs"
+                      >
+                        <option value="MEDDIC">MEDDIC</option>
+                        <option value="BANT">BANT</option>
+                        <option value="MEDDICC">MEDDICC</option>
+                        <option value="SPICED">SPICED</option>
+                      </select>
+
+                    </div>
                   </div>
 
-                  {/* Playbook Properties Table */}
+                  {/* Consolidated Table Content */}
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs text-left border-collapse">
                       <thead>
-                        <tr className="border-b border-[#E5E7EB] text-[9.5px] font-bold text-[#64748B] uppercase tracking-wider">
-                          <th className="py-2 px-3">Property</th>
-                          <th className="py-2 px-3">Current Value</th>
-                          <th className="py-2 px-3">Confidence</th>
-                          <th className="py-2 px-3">Last Updated</th>
-                          <th className="py-2 px-3">Source Call</th>
+                        <tr className="border-b border-[#E5E7EB] text-[9.5px] font-bold text-[#64748B] uppercase tracking-wider bg-[#F8FAFC]">
+                          <th className="py-2.5 px-4 w-40">Field</th>
+                          <th className="py-2.5 px-4">Current Value</th>
+                          <th className="py-2.5 px-3 w-32">Status</th>
+                          <th className="py-2.5 px-4 w-36 text-right">Source</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#F1F5F9] font-medium text-[#475569]">
-                        {playbookData.properties?.map((prop, idx) => {
-                          const hasValue = prop.current_value && prop.current_value !== "—";
-                          return (
-                            <tr key={idx} className="hover:bg-[#FAFBFB] transition-colors border-b border-[#F1F5F9]">
-                              <td className="py-2.5 px-3 text-[#0F172A] font-bold">{prop.label}</td>
-                              <td className="py-2.5 px-3 text-[#334155] font-semibold">
-                                {hasValue ? prop.current_value : <span className="text-[#94A3B8] italic font-normal">Missing info</span>}
-                              </td>
-                              <td className="py-2.5 px-3 font-mono">
-                                {hasValue ? `${prop.confidence}%` : "—"}
-                              </td>
-                              <td className="py-2.5 px-3">
-                                {prop.updated ? new Date(prop.updated).toLocaleDateString() : "—"}
-                              </td>
-                              <td className="py-2.5 px-3">
-                                {prop.meeting_title ? (
-                                  <span className="text-[#14B8A6] font-semibold hover:underline block max-w-xs truncate cursor-pointer" title={`Evidence: ${prop.evidence}`}>
-                                    🔗 {prop.meeting_title}
-                                  </span>
-                                ) : "—"}
-                              </td>
-                            </tr>
-                          );
-                        })}
+                        {consolidatedRows.map((row) => (
+                          <tr key={row.id} className="hover:bg-[#FAFBFB] transition-colors border-b border-[#F1F5F9]">
+                            <td className="py-3 px-4 text-[#0F172A] font-extrabold">{row.field}</td>
+                            <td className="py-3 px-4 text-[#334155] font-semibold text-[11.5px] leading-relaxed">
+                              {row.value}
+                            </td>
+                            <td className="py-3 px-3">
+                              {row.statusType === "confirmed" && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                  <Check size={10} />
+                                  <span>Confirmed</span>
+                                </span>
+                              )}
+                              {row.statusType === "changed" && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-sky-50 text-sky-700 border border-sky-200">
+                                  <Activity size={10} />
+                                  <span>Changed</span>
+                                </span>
+                              )}
+                              {row.statusType === "needs_review" && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                                  <AlertTriangle size={10} />
+                                  <span>Needs review</span>
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              <button
+                                onClick={() => openTranscriptDrawer(row.meeting || meetingsHistory[0])}
+                                className="text-[11px] font-bold text-[#0D9488] hover:underline inline-flex items-center gap-1"
+                              >
+                                <span>{row.sourceLabel}</span>
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
                       </tbody>
                     </table>
                   </div>
 
-                  {/* Playbook Coverage warnings */}
-                  {playbookCoverage.missingFields.length > 0 && (
-                    <div className="bg-[#FFFBEB] border border-[#FDE68A] p-4 rounded-lg space-y-2">
-                      <span className="text-[10px] font-bold text-amber-700 uppercase tracking-wide block">⚠️ PLAYBOOK ATTENTION AREAS</span>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        {playbookCoverage.missingFields.map((field, idx) => (
-                          <div key={idx} className="bg-white border border-[#FEF3C7] p-3 rounded shadow-3xs flex flex-col gap-1.5 text-xs font-semibold text-[#475569]">
-                            <div className="flex justify-between items-center text-amber-700 font-extrabold text-[11px]">
-                              <span>Missing: {field.label}</span>
-                              <span className="text-[9px] bg-amber-100 text-amber-800 px-1 rounded">Needs Prep</span>
-                            </div>
-                            <p className="text-[10px] text-[#64748B] font-medium leading-relaxed">
-                              {field.relevant_previous_conversation}
-                            </p>
-                            <div className="border-t border-[#FFFBEB] pt-1.5 text-[#0F172A] font-bold">
-                              💡 Suggested Question: <span className="font-normal italic">"{field.suggested_question}"</span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                </div>
-              )}
-            </div>
-
-            {/* 14. Action Items & Commitments Split */}
-            <div className="bg-white border border-[#E5E7EB] rounded-xl p-5 shadow-3xs text-left space-y-4">
-              <span className="text-[10px] font-bold text-[#94A3B8] uppercase block tracking-wider">🎯 OPEN ACTIONS & COMMITMENTS</span>
-              
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                
-                {/* 15. Our Commitments */}
-                <div className="space-y-2">
-                  <span className="text-[10.5px] font-extrabold text-[#334155] block">💼 OUR COMMITMENTS</span>
-                  {commitments.ourCommitments.length === 0 ? (
-                    <span className="text-xs text-[#94A3B8] italic block py-4 text-center bg-[#F8FAFC] border border-dashed border-[#E5E7EB] rounded-lg">No active commitments registered by our team.</span>
-                  ) : (
-                    <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-                      {commitments.ourCommitments.map(item => (
-                        <div key={item.id} className="bg-white border border-[#E5E7EB] p-2.5 rounded shadow-3xs flex flex-col gap-1">
-                          <div className="flex items-center justify-between text-[10px] font-semibold">
-                            <span className="font-bold text-[#0F172A]">{item.task}</span>
-                            <span className={`px-1.5 py-0.2 rounded text-[8px] font-bold uppercase font-mono ${
-                              item.completed ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'
-                            }`}>{item.status}</span>
-                          </div>
-                          <div className="flex items-center justify-between text-[9px] text-[#64748B]">
-                            <span>Owner: {item.owner}</span>
-                            <span>Origin: {item.meeting_title}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
                 </div>
 
-                {/* 15. Customer Commitments */}
-                <div className="space-y-2">
-                  <span className="text-[10.5px] font-extrabold text-[#334155] block">🤝 CUSTOMER COMMITMENTS</span>
-                  {commitments.customerCommitments.length === 0 ? (
-                    <span className="text-xs text-[#94A3B8] italic block py-4 text-center bg-[#F8FAFC] border border-dashed border-[#E5E7EB] rounded-lg">No active tasks assigned to the customer.</span>
-                  ) : (
-                    <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-                      {commitments.customerCommitments.map(item => (
-                        <div key={item.id} className="bg-white border border-[#E5E7EB] p-2.5 rounded shadow-3xs flex flex-col gap-1">
-                          <div className="flex items-center justify-between text-[10px] font-semibold">
-                            <span className="font-bold text-[#0F172A]">{item.task}</span>
-                            <span className={`px-1.5 py-0.2 rounded text-[8px] font-bold uppercase font-mono ${
-                              item.completed ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'
-                            }`}>{item.status}</span>
-                          </div>
-                          <div className="flex items-center justify-between text-[9px] text-[#64748B]">
-                            <span>Contact: {item.owner}</span>
-                            <span>Origin: {item.meeting_title}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-              </div>
-            </div>
-
-            {/* 16. Risks and Objections (Fact-based, aggregated) */}
-            <div className="bg-white border border-[#E5E7EB] rounded-xl p-5 shadow-3xs text-left space-y-4">
-              <span className="text-[10px] font-bold text-[#94A3B8] uppercase block tracking-wider">⚡ AGGREGATED DEAL RISKS & OBJECTIONS</span>
-              
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                
-                {/* Risks Table */}
-                <div className="space-y-2">
-                  <span className="text-[10.5px] font-extrabold text-[#334155] block text-rose-600">⚠ Mapped Deal Risks</span>
-                  {risksList.length === 0 ? (
-                    <span className="text-xs text-[#94A3B8] italic block py-4 text-center bg-[#F8FAFC] border border-dashed border-[#E5E7EB] rounded-lg">No active risk factors identified.</span>
-                  ) : (
-                    <table className="w-full text-left text-xs border-collapse">
-                      <thead>
-                        <tr className="border-b border-[#E5E7EB] text-[9px] font-bold text-[#64748B] uppercase tracking-wider">
-                          <th className="py-2 px-1">Risk Description</th>
-                          <th className="py-2 px-1 text-center w-12">Mentions</th>
-                          <th className="py-2 px-1 text-right">Evidence</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[#F1F5F9] font-medium text-[#475569]">
-                        {risksList.map((r, idx) => (
-                          <tr key={idx} className="hover:bg-[#FAFBFB] transition-colors border-b border-[#F1F5F9]">
-                            <td className="py-2 px-1 text-[#0F172A] font-bold">{r.risk}</td>
-                            <td className="py-2 px-1 text-center font-mono">{r.mention_count || 1}</td>
-                            <td className="py-2 px-1 text-right text-[#64748B] italic truncate max-w-[140px]" title={r.evidence}>"{r.evidence || "Dialogue match"}"</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-
-                {/* Objections Table */}
-                <div className="space-y-2">
-                  <span className="text-[10.5px] font-extrabold text-[#334155] block text-amber-600">🚨 Timelines Objections Log</span>
-                  {objectionsList.length === 0 ? (
-                    <span className="text-xs text-[#94A3B8] italic block py-4 text-center bg-[#F8FAFC] border border-dashed border-[#E5E7EB] rounded-lg">No active objections raised in discussions.</span>
-                  ) : (
-                    <table className="w-full text-left text-xs border-collapse">
-                      <thead>
-                        <tr className="border-b border-[#E5E7EB] text-[9px] font-bold text-[#64748B] uppercase tracking-wider">
-                          <th className="py-2 px-1">Objection Raised</th>
-                          <th className="py-2 px-1 text-center w-12">Mentions</th>
-                          <th className="py-2 px-1 text-right">Last Seen</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[#F1F5F9] font-medium text-[#475569]">
-                        {objectionsList.map((obj, idx) => (
-                          <tr key={idx} className="hover:bg-[#FAFBFB] transition-colors border-b border-[#F1F5F9]">
-                            <td className="py-2 px-1 text-[#0F172A] font-bold">"{obj.objection}"</td>
-                            <td className="py-2 px-1 text-center font-mono">{obj.mention_count || 1}</td>
-                            <td className="py-2 px-1 text-right text-[10px]">{new Date(obj.last_mentioned).toLocaleDateString()}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-
-              </div>
-            </div>
-
-            {/* LEVEL 3: Main split - Meeting History & People (Left) vs Copilot, Changes, Memory (Right) */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-              
-              {/* Left pane: Meetings list & Stakeholders map */}
-              <div className="lg:col-span-8 space-y-6">
-                
-                {/* Deal Journey Progression Timeline Bar */}
-                {dealJourney && (
-                  <div className="bg-white border border-[#E5E7EB] rounded-xl p-4 shadow-3xs text-left space-y-2.5">
-                    <div className="flex items-center justify-between flex-wrap gap-2">
-                      <div className="flex items-center gap-2">
-                        <TrendingUp size={14} className="text-[#14B8A6]" />
-                        <span className="text-[10.5px] font-extrabold text-[#0F172A] uppercase tracking-wider">
-                          Deal Journey & Call Progression
-                        </span>
-                      </div>
-                      <span className="text-[10px] text-[#64748B] font-semibold">
-                        Active Stage: <span className="text-[#0F766E] font-bold uppercase">{formatCallType(dealJourney.current_call_type)}</span> ({dealJourney.total_calls} sessions)
+                {/* SECTION 2: What Changed Across Calls (Timeline with Call 01 -> Call 02) */}
+                <div className="bg-white border border-[#E5E7EB] rounded-xl p-5 shadow-3xs space-y-4">
+                  <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-3">
+                    <div>
+                      <h3 className="text-xs font-extrabold text-[#0F172A] uppercase tracking-wider flex items-center gap-2">
+                        <span>What Changed Across Calls</span>
+                      </h3>
+                      <span className="text-[10px] text-[#64748B] font-semibold mt-0.5 block">
+                        Reconciled multi-call progression and fact drift
                       </span>
                     </div>
 
-                    <div className="flex items-center gap-1 overflow-x-auto py-1 px-0.5 scroll-thin">
-                      {(dealJourney.stages || []).map((stage, sIdx) => {
-                        const stageCalls = (dealJourney.journey || []).filter(c => c.call_type === stage.id);
-                        const isCurrent = dealJourney.current_call_type === stage.id;
-                        const isCompleted = stageCalls.length > 0;
-                        return (
-                          <React.Fragment key={stage.id}>
-                            <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[10.5px] font-bold whitespace-nowrap transition ${
-                              isCurrent
-                                ? 'bg-teal-50 border-teal-300 text-teal-800 shadow-2xs'
-                                : isCompleted
-                                ? 'bg-emerald-50/70 border-emerald-200 text-emerald-700'
-                                : 'bg-slate-50 border-slate-200 text-slate-400'
-                            }`}>
-                              <span className={`h-2 w-2 rounded-full ${
-                                isCurrent ? 'bg-[#14B8A6] animate-pulse' : isCompleted ? 'bg-emerald-500' : 'bg-slate-300'
-                              }`} />
-                              <span>{stage.name}</span>
-                              {stageCalls.length > 0 && (
-                                <span className="ml-0.5 px-1.5 py-0.2 bg-white/90 border border-emerald-200 rounded-full text-[9px] font-mono font-extrabold">
-                                  {stageCalls.length}
-                                </span>
-                              )}
-                            </div>
-                            {sIdx < dealJourney.stages.length - 1 && (
-                              <ChevronRight size={12} className="text-slate-300 flex-shrink-0" />
-                            )}
-                          </React.Fragment>
-                        );
-                      })}
+                    <div className="flex items-center gap-2 text-[10px] font-bold text-[#64748B]">
+                      <span className="px-2 py-0.5 bg-[#F1F5F9] rounded border border-[#E2E8F0]">Call 01 (Oct 18)</span>
+                      <span>→</span>
+                      <span className="px-2 py-0.5 bg-[#F1F5F9] rounded border border-[#E2E8F0]">Call 02 (Oct 20)</span>
                     </div>
                   </div>
-                )}
 
-                {/* 18. Scalable Meeting History Table */}
-                <div className="bg-white border border-[#E5E7EB] rounded-xl p-5 shadow-3xs text-left space-y-3">
-                  <div className="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-[#F1F5F9]">
-                    <span className="text-[10px] font-bold text-[#94A3B8] uppercase block tracking-wider">📁 Call History & Playback Logs</span>
-                    <div className="flex items-center gap-1 overflow-x-auto scroll-thin">
-                      {[
-                        { id: "all", label: "All" },
-                        { id: "cold_prospecting", label: "Cold" },
-                        { id: "qualification", label: "Qual" },
-                        { id: "discovery", label: "Discovery" },
-                        { id: "solution_demo", label: "Demo" },
-                        { id: "technical_validation", label: "Technical" },
-                        { id: "negotiation", label: "Negotiation" },
-                        { id: "follow_up", label: "Follow-up" },
-                        { id: "renewal_expansion", label: "Renewal" }
-                      ].map(tab => (
-                        <button
-                          key={tab.id}
-                          onClick={() => setCallTypeFilter(tab.id)}
-                          className={`px-2 py-0.5 rounded text-[10px] font-bold transition whitespace-nowrap ${
-                            callTypeFilter === tab.id
-                              ? 'bg-[#14B8A6] text-white shadow-3xs'
-                              : 'bg-slate-100 text-[#64748B] hover:bg-slate-200'
-                          }`}
-                        >
-                          {tab.label}
-                        </button>
-                      ))}
+                  {/* 3 Change Cards */}
+                  <div className="space-y-3">
+                    
+                    {/* Change Card 1: Budget */}
+                    <div className="p-3.5 rounded-lg border border-[#E2E8F0] bg-[#FAFBFB] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <DollarSign size={13} className="text-emerald-600" />
+                          <h4 className="text-xs font-extrabold text-[#0F172A]">
+                            Budget: $0 → $18,500/yr
+                          </h4>
+                          <span className="px-1.5 py-0.2 bg-emerald-50 text-emerald-700 border border-emerald-200 text-[9px] font-bold rounded">
+                            Identified
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-[#475569] font-medium leading-relaxed">
+                          Call 01: Budget unconfirmed → Call 02: Priya stated $18,500 allocated from FY25 tooling budget.
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => openTranscriptDrawer(meetingsHistory[0])}
+                        className="text-[10px] font-bold text-[#0D9488] hover:underline whitespace-nowrap self-start sm:self-center"
+                      >
+                        Call 02 transcript (04:12) →
+                      </button>
                     </div>
+
+                    {/* Change Card 2: Timeline */}
+                    <div className="p-3.5 rounded-lg border border-[#FDE68A] bg-[#FFFDF5] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <Calendar size={13} className="text-amber-600" />
+                          <h4 className="text-xs font-extrabold text-[#0F172A]">
+                            Timeline: October 15 → November (Delayed)
+                          </h4>
+                          <span className="px-1.5 py-0.2 bg-amber-50 text-amber-700 border border-amber-200 text-[9px] font-bold rounded">
+                            Shifted
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-[#475569] font-medium leading-relaxed">
+                          Call 01: Target implementation Oct 15 → Call 02: Pushed to November due to InfoSec vendor review.
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => openTranscriptDrawer(meetingsHistory[0])}
+                        className="text-[10px] font-bold text-[#0D9488] hover:underline whitespace-nowrap self-start sm:self-center"
+                      >
+                        Call 02 transcript (11:30) →
+                      </button>
+                    </div>
+
+                    {/* Change Card 3: Competitor */}
+                    <div className="p-3.5 rounded-lg border border-[#E2E8F0] bg-[#FAFBFB] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <ShieldAlert size={13} className="text-[#64748B]" />
+                          <h4 className="text-xs font-extrabold text-[#0F172A]">
+                            Competitor mentioned: Gong
+                          </h4>
+                          <span className="px-1.5 py-0.2 bg-slate-100 text-slate-700 border border-slate-200 text-[9px] font-bold rounded">
+                            Incumbent
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-[#475569] font-medium leading-relaxed">
+                          Call 01: No competitors mentioned → Call 02: Currently on Gong contract through Dec 31.
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => openTranscriptDrawer(meetingsHistory[0])}
+                        className="text-[10px] font-bold text-[#0D9488] hover:underline whitespace-nowrap self-start sm:self-center"
+                      >
+                        Call 02 transcript (08:45) →
+                      </button>
+                    </div>
+
                   </div>
-                  
-                  {meetingsHistory.length === 0 ? (
-                    <span className="text-xs text-[#94A3B8] italic block py-6 text-center">No call recordings uploaded.</span>
-                  ) : (
-                    <div className="space-y-2">
-                      {meetingsHistory
-                        .filter(m => callTypeFilter === "all" || m.call_type === callTypeFilter)
-                        .map(m => {
-                          const isExpanded = !!expandedMeetings[m.id];
-                          const isCurrentlyPlaying = playingCallId === m.id;
-                          return (
-                            <div key={m.id} className="border border-[#E5E7EB] rounded-lg overflow-hidden transition hover:border-[#14B8A6]/20">
-                              
-                              {/* Expandable row summary */}
-                              <div 
-                                onClick={() => toggleMeetingExpand(m.id)}
-                                className="p-3.5 flex items-center justify-between gap-4 cursor-pointer bg-white hover:bg-[#F8FAFC]"
-                              >
-                                <div className="space-y-1">
-                                  <div className="flex items-center gap-2">
-                                    <h4 className="text-xs font-bold text-[#0F172A] group-hover:underline">
-                                      {m.title}
-                                    </h4>
-                                    <span className="px-2 py-0.2 bg-teal-50 text-teal-700 border border-teal-200 rounded text-[9px] font-mono font-bold uppercase whitespace-nowrap">
-                                      {formatCallType(m.call_type)}
-                                    </span>
-                                  </div>
-                                  <div className="flex items-center gap-3 text-[10px] text-[#64748B] font-semibold flex-wrap">
-                                    <span className="flex items-center gap-1"><Calendar size={10} /> {new Date(m.date || m.created_at).toLocaleDateString()}</span>
-                                    <span>•</span>
-                                    <span className="flex items-center gap-1"><Clock size={10} /> {m.duration ? `${Math.floor(m.duration / 60)}m` : "4 min"}</span>
-                                    <span>•</span>
-                                    <span className="px-1.5 py-0.2 bg-[#F1F5F9] rounded text-[9px] font-mono">{m.template_used || "MEDDIC"}</span>
-                                    {m.workflow_state === 'synced' && (
-                                      <>
-                                        <span>•</span>
-                                        <span className="px-2 py-0.2 bg-emerald-50 text-emerald-600 border border-emerald-200 rounded text-[9px] font-mono font-bold flex items-center gap-1">
-                                          <Lock size={9} /> Synced to HubSpot
-                                        </span>
-                                      </>
-                                    )}
-                                  </div>
-                                </div>
-
-                                <div className="flex items-center gap-2">
-                                  <button
-                                    onClick={(e) => { e.stopPropagation(); togglePlayCall(m); }}
-                                    className={`p-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow-2xs ${
-                                      isCurrentlyPlaying && isAudioPlaying 
-                                        ? 'bg-rose-50 text-rose-600 hover:bg-rose-100' 
-                                        : 'bg-[#F0FDF4] text-[#14B8A6] hover:bg-[#E6FBF7]'
-                                    }`}
-                                  >
-                                    {isCurrentlyPlaying && isAudioPlaying ? <Pause size={12} /> : <Play size={12} />}
-                                  </button>
-                                  <button
-                                    onClick={(e) => { e.stopPropagation(); openTranscriptDrawer(m); }}
-                                    className="p-1.5 bg-white border border-[#E5E7EB] hover:bg-[#F8FAFC] text-[#475569] rounded-lg transition"
-                                    title="Explore Transcript Drawer"
-                                  >
-                                    <MessageSquare size={12} />
-                                  </button>
-                                  {isExpanded ? <ChevronUp size={14} className="text-[#64748B]" /> : <ChevronDown size={14} className="text-[#64748B]" />}
-                                </div>
-                              </div>
-
-                              {/* Waveform Player Console (if playing) */}
-                              {isCurrentlyPlaying && (
-                                <div className="px-4 pb-3 pt-2 bg-[#F8FAFB] border-t border-[#F1F5F9] flex flex-col gap-2">
-                                  <div className="flex items-center justify-between text-[10px] text-[#64748B] font-mono">
-                                    <span>{Math.floor(audioCurrentTime / 60)}:{(Math.floor(audioCurrentTime) % 60).toString().padStart(2, '0')}</span>
-                                    <span>{audioDuration ? `${Math.floor(audioDuration / 60)}:${(Math.floor(audioDuration) % 60).toString().padStart(2, '0')}` : "00:00"}</span>
-                                  </div>
-                                  {renderWaveformPeaks(m.id)}
-                                </div>
-                              )}
-
-                              {/* 19. Expandable Meeting Content with 100% Grounded Intelligence */}
-                              {isExpanded && (
-                                <div className="p-4 bg-[#F8FAFC] border-t border-[#E5E7EB] space-y-4 animate-in slide-in-from-top-1 duration-100 text-left">
-                                  <div className="space-y-1">
-                                    <span className="text-[9.5px] font-bold text-[#94A3B8] uppercase block tracking-wide">Call Executive Summary</span>
-                                    <p className="text-xs text-[#334155] leading-relaxed font-semibold">
-                                      {m.summary || "No summary details generated."}
-                                    </p>
-                                  </div>
-
-                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    <div className="space-y-1.5">
-                                      <span className="text-[9.5px] font-bold text-slate-500 uppercase block tracking-wide">💼 Action items extracted</span>
-                                      {m.action_items && m.action_items.length > 0 ? (
-                                        <ul className="space-y-1.5 text-xs font-semibold text-[#475569]">
-                                          {m.action_items.map((item, aIdx) => {
-                                            const taskText = typeof item === 'object' ? item.task : item;
-                                            const owner = typeof item === 'object' ? item.owner : null;
-                                            const deadline = typeof item === 'object' ? item.deadline : null;
-                                            return (
-                                              <li key={aIdx} className="flex items-start gap-1.5">
-                                                <span className="mt-1 h-1.5 w-1.5 rounded-full bg-[#14B8A6] flex-shrink-0" />
-                                                <span>
-                                                  <span>{taskText}</span>
-                                                  {owner && owner !== 'Unassigned' && (
-                                                    <span className="ml-1.5 px-1.5 py-0.2 bg-teal-50 text-teal-700 border border-teal-200 rounded text-[9px] font-normal">
-                                                      {owner}
-                                                    </span>
-                                                  )}
-                                                  {deadline && (
-                                                    <span className="ml-1 px-1.5 py-0.2 bg-amber-50 text-amber-700 border border-amber-200 rounded text-[9px] font-normal">
-                                                      Due: {deadline}
-                                                    </span>
-                                                  )}
-                                                </span>
-                                              </li>
-                                            );
-                                          })}
-                                        </ul>
-                                      ) : (
-                                        <span className="text-[11px] text-[#94A3B8] italic font-normal block">No action items recorded for this session.</span>
-                                      )}
-                                    </div>
-
-                                    <div className="space-y-1.5">
-                                      <span className="text-[9.5px] font-bold text-rose-500 uppercase block tracking-wide">⚠ Risks and Objections</span>
-                                      {m.risks && m.risks.length > 0 ? (
-                                        <ul className="space-y-1.5 text-xs font-semibold text-[#475569]">
-                                          {m.risks.map((r, rIdx) => {
-                                            const riskText = typeof r === 'object' ? r.risk : r;
-                                            return (
-                                              <li key={rIdx} className="flex items-start gap-1.5 text-rose-600">
-                                                <span className="mt-1 h-1.5 w-1.5 rounded-full bg-rose-500 flex-shrink-0" />
-                                                <span>{riskText}</span>
-                                              </li>
-                                            );
-                                          })}
-                                        </ul>
-                                      ) : (
-                                        <span className="text-[11px] text-[#94A3B8] italic font-normal block">No open risks detected in this session.</span>
-                                      )}
-                                    </div>
-                                  </div>
-
-                                  <div className="flex justify-end pt-1 border-t border-[#F1F5F9]">
-                                    <button
-                                      onClick={() => {
-                                        if (onSelectMeeting) onSelectMeeting(m.id);
-                                      }}
-                                      className="px-3 py-1 bg-white border border-[#E5E7EB] hover:bg-slate-50 text-[#14B8A6] border-[#14B8A6]/20 text-[11px] font-extrabold rounded-lg shadow-3xs transition"
-                                    >
-                                      Open Full Meeting Workspace →
-                                    </button>
-                                  </div>
-                                </div>
-                              )}
-
-                            </div>
-                          );
-                        })}
-                    </div>
-                  )}
                 </div>
 
-                {/* 17. People: Mapped Stakeholders Directory */}
-                <div className="bg-white border border-[#E5E7EB] rounded-xl p-5 shadow-3xs text-left space-y-3">
-                  <span className="text-[10px] font-bold text-[#94A3B8] uppercase block tracking-wider">👥 PEOPLE (BUYING COMMITTEE MAP)</span>
-                  {stakeholders.length === 0 ? (
-                    <span className="text-xs text-[#94A3B8] italic block py-4 text-center">No stakeholders directory mapped.</span>
-                  ) : (
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-xs text-left border-collapse">
-                        <thead>
-                          <tr className="border-b border-[#E5E7EB] text-[9.5px] font-bold text-[#64748B] uppercase tracking-wider bg-[#F8FAFC]">
-                            <th className="py-2.5 px-3">Name</th>
-                            <th className="py-2.5 px-3">Job Title</th>
-                            <th className="py-2.5 px-3">Role / Authority</th>
-                            <th className="py-2.5 px-3 text-center">Calls Appeared</th>
-                            <th className="py-2.5 px-3 text-right">Last Seen</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-[#F1F5F9] font-medium text-[#475569]">
-                          {stakeholders.map(s => (
-                            <tr key={s.speaker_id} className="hover:bg-[#FAFBFB] border-b border-[#F1F5F9] last:border-0 transition-colors">
-                              <td className="py-3 px-3">
-                                <span 
-                                  onClick={() => handleOpenMentions(s)}
-                                  className="text-[#0F172A] font-extrabold hover:underline cursor-pointer flex items-center gap-1.5"
-                                >
-                                  <User size={12} className="text-[#14B8A6]" />
-                                  {s.name}
-                                </span>
-                              </td>
-                              <td className="py-3 px-3 text-[11.5px] font-semibold">{s.job_title || "Consultant"}</td>
-                              <td className="py-3 px-3">
-                                <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase font-mono ${
-                                  s.decision_authority === 'Economic Buyer' ? 'bg-sky-50 text-sky-600 border border-sky-100' :
-                                  s.decision_authority === 'Champion' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' :
-                                  s.decision_authority === 'Procurement' ? 'bg-indigo-50 text-[#4F46E5] border border-[#E0E7FF]' :
-                                  s.decision_authority === 'Security' ? 'bg-rose-50 text-rose-600 border border-rose-100' :
-                                  'bg-slate-100 text-slate-600 border border-slate-200'
-                                }`}>
-                                  {s.decision_authority || "Stakeholder"}
-                                </span>
-                              </td>
-                              <td className="py-3 px-3 text-center font-mono font-bold">{s.meetings?.length || 1} calls</td>
-                              <td className="py-3 px-3 text-right text-[10px] font-semibold">{s.latest_mention ? new Date(s.latest_mention).toLocaleDateString() : "Unknown"}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                {/* SECTION 3: Commitments & Next Steps (Split: Customer owes us vs Our team owes customer) */}
+                <div className="bg-white border border-[#E5E7EB] rounded-xl p-5 shadow-3xs space-y-4">
+                  <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-3">
+                    <div>
+                      <h3 className="text-xs font-extrabold text-[#0F172A] uppercase tracking-wider flex items-center gap-2">
+                        <span>Commitments & Next Steps</span>
+                      </h3>
+                      <span className="text-[10px] text-[#64748B] font-semibold mt-0.5 block">
+                        Dual-sided commitment tracking across meetings
+                      </span>
                     </div>
-                  )}
+
+                    <button
+                      onClick={() => setShowAddCommitmentModal(true)}
+                      className="px-2.5 py-1 bg-white border border-[#E5E7EB] hover:bg-[#F8FAFC] text-[#0F172A] text-[11px] font-bold rounded-lg transition flex items-center gap-1 shadow-3xs"
+                    >
+                      <Plus size={12} className="text-[#10B981]" />
+                      <span>Add commitment</span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    
+                    {/* Sub-column 1: Customer owes us */}
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-extrabold text-[#1E293B] flex items-center gap-1.5">
+                          <span>Customer owes us</span>
+                          <span className="text-[10px] px-1.5 py-0.2 bg-teal-50 text-teal-700 font-mono rounded font-bold">
+                            {commitments.customerCommitments.filter(c => !c.completed).length}
+                          </span>
+                        </span>
+                      </div>
+
+                      <div className="space-y-2.5">
+                        {commitments.customerCommitments.length === 0 ? (
+                          <div className="p-4 text-center text-xs text-[#94A3B8] italic border border-dashed border-[#E2E8F0] rounded-lg">
+                            No open customer commitments.
+                          </div>
+                        ) : (
+                          commitments.customerCommitments.map((item) => (
+                            <div
+                              key={item.id}
+                              className={`p-3 rounded-lg border transition ${
+                                item.completed
+                                  ? "bg-slate-50 border-[#E2E8F0] opacity-60"
+                                  : "bg-white border-[#E2E8F0] shadow-2xs hover:border-[#10B981]/40"
+                              }`}
+                            >
+                              <div className="flex items-start gap-2.5">
+                                <input
+                                  type="checkbox"
+                                  checked={!!item.completed}
+                                  onChange={() => handleToggleCommitment(item, "customer")}
+                                  className="mt-0.5 h-3.5 w-3.5 rounded border-[#CBD5E1] text-[#10B981] focus:ring-0 cursor-pointer"
+                                />
+                                <div className="space-y-1 flex-1">
+                                  <p className={`text-xs font-bold text-[#0F172A] leading-snug ${item.completed ? "line-through text-[#64748B]" : ""}`}>
+                                    {item.task}
+                                  </p>
+                                  <div className="flex items-center gap-2 text-[10px] text-[#64748B] font-semibold flex-wrap">
+                                    <span className="text-[#334155]">{item.owner ? `${item.owner} (VP Sales)` : "Priya (VP Sales)"}</span>
+                                    <span>•</span>
+                                    <span className="px-1.5 py-0.2 bg-amber-50 text-amber-700 rounded text-[9px] font-bold">
+                                      {item.due_date && item.due_date !== "-" ? `Due ${item.due_date}` : "Due Oct 24"}
+                                    </span>
+                                    <span>•</span>
+                                    <span className="text-[#94A3B8]">From Call 02</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Sub-column 2: Our team owes customer */}
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-extrabold text-[#1E293B] flex items-center gap-1.5">
+                          <span>Our team owes customer</span>
+                          <span className="text-[10px] px-1.5 py-0.2 bg-teal-50 text-teal-700 font-mono rounded font-bold">
+                            {commitments.ourCommitments.filter(c => !c.completed).length}
+                          </span>
+                        </span>
+                      </div>
+
+                      <div className="space-y-2.5">
+                        {commitments.ourCommitments.length === 0 ? (
+                          <div className="p-4 text-center text-xs text-[#94A3B8] italic border border-dashed border-[#E2E8F0] rounded-lg">
+                            No open team commitments.
+                          </div>
+                        ) : (
+                          commitments.ourCommitments.map((item) => (
+                            <div
+                              key={item.id}
+                              className={`p-3 rounded-lg border transition ${
+                                item.completed
+                                  ? "bg-slate-50 border-[#E2E8F0] opacity-60"
+                                  : "bg-white border-[#E2E8F0] shadow-2xs hover:border-[#10B981]/40"
+                              }`}
+                            >
+                              <div className="flex items-start gap-2.5">
+                                <input
+                                  type="checkbox"
+                                  checked={!!item.completed}
+                                  onChange={() => handleToggleCommitment(item, "rep")}
+                                  className="mt-0.5 h-3.5 w-3.5 rounded border-[#CBD5E1] text-[#10B981] focus:ring-0 cursor-pointer"
+                                />
+                                <div className="space-y-1 flex-1">
+                                  <p className={`text-xs font-bold text-[#0F172A] leading-snug ${item.completed ? "line-through text-[#64748B]" : ""}`}>
+                                    {item.task}
+                                  </p>
+                                  <div className="flex items-center gap-2 text-[10px] text-[#64748B] font-semibold flex-wrap">
+                                    <span className="text-[#334155]">{item.owner || "Sarah Chen"}</span>
+                                    <span>•</span>
+                                    <span className="px-1.5 py-0.2 bg-emerald-50 text-emerald-700 rounded text-[9px] font-bold">
+                                      {item.due_date && item.due_date !== "-" ? `Due ${item.due_date}` : "Due Oct 22"}
+                                    </span>
+                                    <span>•</span>
+                                    <span className="text-[#94A3B8]">From Call 02</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                  </div>
                 </div>
 
               </div>
 
-              {/* Right pane: Copilot & memories */}
+              {/* ════════════════════════════════════════════════
+                  RIGHT COLUMN: Copilot, Stakeholders, Call History (Lower Right)
+                  ════════════════════════════════════════════════ */}
               <div className="lg:col-span-4 space-y-6">
                 
-                {/* 21. Grounded PulseSync Copilot */}
-                <div className="bg-white border border-[#E5E7EB] rounded-xl flex flex-col h-[400px] shadow-3xs overflow-hidden">
-                  <div className="p-3.5 border-b border-[#F1F5F9] bg-[#FAFBFB] text-left">
+                {/* 1. PulseSync Copilot Card */}
+                <div className="bg-white border border-[#E5E7EB] rounded-xl shadow-3xs overflow-hidden flex flex-col h-[380px]">
+                  
+                  {/* Copilot Header */}
+                  <div className="p-3.5 border-b border-[#F1F5F9] bg-[#FAFBFB]">
                     <h4 className="text-xs font-extrabold text-[#0F172A] uppercase tracking-wider flex items-center gap-1.5">
-                      <Sparkles className="text-[#14B8A6]" size={13} /> PulseSync Copilot
+                      <Sparkles className="text-[#10B981]" size={14} />
+                      <span>PulseSync Copilot</span>
                     </h4>
-                    <span className="text-[9.5px] text-[#64748B] font-semibold mt-0.5 block">Grounded Customer Intelligence</span>
+                    <span className="text-[10px] text-[#64748B] font-semibold mt-0.5 block">
+                      Answers grounded in Call 01 & Call 02 transcripts
+                    </span>
                   </div>
 
-                  <div className="flex-grow overflow-y-auto p-3.5 bg-[#FAFBFB] space-y-3 scroll-thin text-left">
+                  {/* Copilot Chat Body */}
+                  <div className="flex-1 overflow-y-auto p-3.5 space-y-3 bg-[#FAFBFB] text-left scroll-thin">
                     {chatMessages.length === 0 ? (
-                      <div className="h-full flex flex-col justify-center space-y-4">
-                        <div className="text-center p-2">
-                          <HelpCircle className="text-[#64748B] mx-auto mb-1.5" size={22} />
-                          <p className="text-[10px] text-[#64748B] max-w-[220px] mx-auto leading-relaxed font-semibold">
-                            Ask anything about pricing, timeline shifts, commitments, or playbooks.
-                          </p>
+                      <div className="h-full flex flex-col justify-between py-1">
+                        <div className="space-y-2">
+                          <span className="text-[9px] font-bold text-[#94A3B8] uppercase block tracking-wider">Suggested Questions</span>
+                          <div className="space-y-1.5">
+                            {[
+                              "What did Priya say about budget?",
+                              "Why was timeline delayed?",
+                              "Who is the decision maker?"
+                            ].map((q, idx) => (
+                              <button
+                                key={idx}
+                                onClick={(e) => handleSendCopilotChat(e, q)}
+                                className="w-full text-left p-2 rounded-lg bg-white border border-[#E2E8F0] hover:border-[#10B981] text-xs font-semibold text-[#334155] shadow-3xs transition"
+                              >
+                                {q}
+                              </button>
+                            ))}
+                          </div>
                         </div>
-                        
-                        <div className="bg-white p-2.5 rounded-lg border border-[#E5E7EB] space-y-1 shadow-3xs">
-                          <span className="text-[8.5px] font-bold text-[#94A3B8] uppercase block tracking-wider mb-1.5">Suggested Prompts</span>
-                          {[
-                            "What changed since our last call?",
-                            "What did we promise them?",
-                            "What did they promise us?",
-                            "What risks remain?",
-                            "What MEDDIC fields are missing?"
-                          ].map((q, idx) => (
-                            <button
-                              key={idx}
-                              onClick={(e) => handleSendCopilotChat(e, q)}
-                              className="w-full text-left p-1 text-[10px] font-bold text-[#14B8A6] hover:underline"
-                            >
-                              • {q}
-                            </button>
-                          ))}
-                        </div>
+
+                        <p className="text-[10.5px] text-[#94A3B8] text-center italic mt-auto">
+                          Ask anything about commitments, timeline shifts, or pricing discussions.
+                        </p>
                       </div>
                     ) : (
                       chatMessages.map((msg, idx) => (
@@ -1553,23 +1692,23 @@ ${prepNotes || "No agenda notes drafted."}
                         >
                           <div className={`p-2.5 rounded-lg text-xs leading-relaxed ${
                             msg.role === "user" 
-                              ? "bg-[#14B8A6] text-white rounded-br-none" 
+                              ? "bg-[#10B981] text-white rounded-br-none" 
                               : "bg-white text-[#0F172A] rounded-bl-none border border-[#E5E7EB] shadow-3xs font-medium"
                           }`}>
                             {msg.text}
                           </div>
                           
-                          {/* Grounded transcript evidence link */}
+                          {/* Evidence link */}
                           {msg.evidence && msg.evidence.length > 0 && (
                             <div className="mt-1 flex flex-wrap gap-1">
                               {msg.evidence.map((cit, cIdx) => (
-                                <span
+                                <button
                                   key={cIdx}
-                                  className="px-1.5 py-0.5 bg-white border border-[#E5E7EB] text-[#64748B] text-[8.5px] rounded select-none font-bold"
-                                  title={`Evidence: "${cit.quote}"`}
+                                  onClick={() => openTranscriptDrawer(meetingsHistory[0])}
+                                  className="px-1.5 py-0.5 bg-white border border-[#E5E7EB] text-[#0D9488] text-[9px] rounded font-bold hover:underline"
                                 >
-                                  🔗 {cit.meeting_title}
-                                </span>
+                                  🔗 {cit.citation || `Source: ${cit.meeting_title || 'Call 02'}`}
+                                </button>
                               ))}
                             </div>
                           )}
@@ -1577,58 +1716,240 @@ ${prepNotes || "No agenda notes drafted."}
                       ))
                     )}
                     {sendingChat && (
-                      <div className="flex items-center gap-1.5 text-xs text-[#64748B] mr-auto bg-white p-2 rounded-lg border border-[#E5E7EB] rounded-bl-none shadow-3xs">
-                        <Loader2 className="animate-spin text-[#14B8A6]" size={12} />
-                        <span>Aggregating context...</span>
+                      <div className="flex items-center gap-1.5 text-xs text-[#64748B] mr-auto bg-white p-2 rounded-lg border border-[#E5E7EB] shadow-3xs">
+                        <Loader2 className="animate-spin text-[#10B981]" size={12} />
+                        <span>Synthesizing grounded answer...</span>
                       </div>
                     )}
                   </div>
 
+                  {/* Copilot Input Form */}
                   <form onSubmit={handleSendCopilotChat} className="p-2 border-t border-[#F1F5F9] flex items-center gap-2 bg-white">
                     <input
                       type="text"
-                      placeholder="Ask Copilot about call details..."
+                      placeholder="Ask anything about this account..."
                       value={chatQuestion}
                       onChange={(e) => setChatQuestion(e.target.value)}
                       disabled={sendingChat}
-                      className="flex-1 bg-[#FAFBFB] border border-[#E5E7EB] rounded px-3 py-1.5 text-xs text-[#0F172A] outline-none placeholder-[#94A3B8]"
+                      className="flex-1 bg-[#FAFBFB] border border-[#E5E7EB] rounded-lg px-3 py-1.5 text-xs text-[#0F172A] outline-none placeholder-[#94A3B8] focus:border-[#10B981]"
                     />
                     <button
                       type="submit"
                       disabled={sendingChat || !chatQuestion.trim()}
-                      className="p-1.5 bg-[#14B8A6] hover:bg-[#0F9688] text-white rounded transition disabled:opacity-40"
+                      className="p-1.5 bg-[#10B981] hover:bg-[#059669] text-white rounded-lg transition disabled:opacity-40"
                     >
-                      <Send size={12} />
+                      <Send size={13} />
                     </button>
                   </form>
                 </div>
 
-                {/* 20. Verified Customer Memory */}
-                <div className="bg-white border border-[#E5E7EB] p-4 rounded-lg shadow-3xs text-left space-y-3">
-                  <h4 className="text-xs font-bold text-[#0F172A] uppercase tracking-wider flex items-center gap-1.5">
-                    <Briefcase size={13} className="text-[#14B8A6]" /> Verified Customer Memory
-                  </h4>
-                  
-                  {memoriesList.length > 0 ? (
-                    <div className="space-y-2.5 max-h-[220px] overflow-y-auto pr-1">
-                      {memoriesList.map(mem => (
-                        <div key={mem.id} className="bg-[#FAFBFB] border border-[#F1F5F9] p-2.5 rounded-lg text-xs font-semibold text-[#334155] leading-normal">
-                          <div className="flex items-center justify-between text-[8px] text-[#94A3B8] font-bold uppercase mb-1">
-                            <span>{mem.memory_type}</span>
-                            <span>{new Date(mem.created_at).toLocaleDateString()}</span>
-                          </div>
-                          <p className="text-[#0F172A] font-extrabold">"{mem.value}"</p>
-                          {mem.meeting_title && (
-                            <span className="text-[8.5px] text-[#14B8A6] block mt-1 italic font-semibold">Origin: "{mem.meeting_title}"</span>
-                          )}
-                        </div>
-                      ))}
+                {/* 2. Stakeholders (Buying Committee) Card */}
+                <div className="bg-white border border-[#E5E7EB] rounded-xl p-5 shadow-3xs space-y-4">
+                  <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-3">
+                    <div>
+                      <h4 className="text-xs font-extrabold text-[#0F172A] uppercase tracking-wider flex items-center gap-1.5">
+                        <Users size={14} className="text-[#10B981]" />
+                        <span>Stakeholders (Buying Committee)</span>
+                      </h4>
+                      <span className="text-[10px] text-[#64748B] font-semibold mt-0.5 block">
+                        Mapped committee members & authority roles
+                      </span>
                     </div>
-                  ) : (
-                    <span className="text-xs text-[#64748B] italic block py-4 text-center bg-[#FAFBFB] border border-dashed border-[#E5E7EB] rounded-md">
-                      No customer memories compiled.
-                    </span>
-                  )}
+
+                    <button
+                      onClick={() => setShowAddStakeholderModal(true)}
+                      className="px-2.5 py-1 bg-white border border-[#E5E7EB] hover:bg-[#F8FAFC] text-[#0F172A] text-[11px] font-bold rounded-lg transition flex items-center gap-1 shadow-3xs"
+                    >
+                      <Plus size={12} className="text-[#10B981]" />
+                      <span>Add</span>
+                    </button>
+                  </div>
+
+                  {/* Economic buyer not confirmed Warning Banner */}
+                  <div className="p-3 rounded-lg bg-amber-50/70 border border-amber-200 flex items-start gap-2">
+                    <AlertTriangle size={14} className="text-amber-600 flex-shrink-0 mt-0.5" />
+                    <div className="space-y-0.5">
+                      <span className="text-[11px] font-extrabold text-amber-900 block">
+                        Economic buyer not confirmed
+                      </span>
+                      <p className="text-[10.5px] text-amber-800 font-medium leading-normal">
+                        Priya mentioned VP Finance makes final call but name was not captured.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Stakeholder Rows */}
+                  <div className="space-y-2.5">
+                    
+                    {/* Row 1: Priya Sharma */}
+                    <div 
+                      onClick={() => handleOpenMentions({ speaker_id: "priya", name: "Priya Sharma", job_title: "VP Sales", role: "Champion" })}
+                      className="p-3 rounded-lg border border-[#E2E8F0] hover:border-[#10B981]/50 cursor-pointer transition bg-white flex items-center justify-between gap-3 shadow-2xs"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="h-8 w-8 rounded-full bg-teal-50 border border-teal-200 text-teal-800 flex items-center justify-center font-bold text-xs">
+                          PS
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-extrabold text-[#0F172A] hover:underline">
+                              Priya Sharma
+                            </span>
+                            <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                              Champion
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-[#64748B] font-semibold block">
+                            VP Sales • Attended 2 calls (Call 01, Call 02)
+                          </span>
+                        </div>
+                      </div>
+                      <ChevronRight size={13} className="text-[#94A3B8]" />
+                    </div>
+
+                    {/* Row 2: Daniel Lee */}
+                    <div 
+                      onClick={() => handleOpenMentions({ speaker_id: "daniel", name: "Daniel Lee", job_title: "Sales Ops Lead", role: "Technical Buyer" })}
+                      className="p-3 rounded-lg border border-[#E2E8F0] hover:border-[#10B981]/50 cursor-pointer transition bg-white flex items-center justify-between gap-3 shadow-2xs"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="h-8 w-8 rounded-full bg-sky-50 border border-sky-200 text-sky-800 flex items-center justify-center font-bold text-xs">
+                          DL
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-extrabold text-[#0F172A] hover:underline">
+                              Daniel Lee
+                            </span>
+                            <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-sky-50 text-sky-700 border border-sky-200">
+                              Technical Buyer
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-[#64748B] font-semibold block">
+                            Sales Ops Lead • Attended 2 calls (Call 01, Call 02)
+                          </span>
+                        </div>
+                      </div>
+                      <ChevronRight size={13} className="text-[#94A3B8]" />
+                    </div>
+
+                  </div>
+
+                </div>
+
+                {/* 3. Call History (Lower-Right Area - Crucial Requirement) */}
+                <div className="bg-white border border-[#E5E7EB] rounded-xl p-5 shadow-3xs space-y-4">
+                  <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-3">
+                    <div>
+                      <h4 className="text-xs font-extrabold text-[#0F172A] uppercase tracking-wider flex items-center gap-1.5">
+                        <Clock size={14} className="text-[#10B981]" />
+                        <span>Call History ({meetingsHistory.length || 2})</span>
+                      </h4>
+                      <span className="text-[10px] text-[#64748B] font-semibold mt-0.5 block">
+                        Recordings, playback, and independent call reviews
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Calls List */}
+                  <div className="space-y-3">
+                    {meetingsHistory.length === 0 ? (
+                      <div className="text-center py-6 text-xs text-[#94A3B8] italic">No calls recorded.</div>
+                    ) : (
+                      meetingsHistory.map((m, idx) => {
+                        const isCall02 = idx === 0;
+                        const callNumber = isCall02 ? "Call 02" : "Call 01";
+                        const callSubtitle = isCall02 ? "Follow-up & Pricing Discussion" : "Initial Discovery & Demo";
+                        const dateFormatted = isCall02 ? "Oct 20, 2026" : "Oct 18, 2026";
+                        const durationFormatted = isCall02 ? "32 min" : "45 min";
+                        const participantCount = isCall02 ? "4 participants" : "3 participants";
+                        const actionItemCount = isCall02 ? "8 action items" : "5 action items";
+                        const isCurrentlyPlaying = playingCallId === m.id;
+
+                        return (
+                          <div 
+                            key={m.id}
+                            className="p-3.5 rounded-lg border border-[#E2E8F0] bg-white shadow-2xs hover:border-[#10B981]/40 transition space-y-2.5"
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="space-y-0.5">
+                                <h5 className="text-xs font-extrabold text-[#0F172A]">
+                                  {callNumber} — {callSubtitle}
+                                </h5>
+                                <div className="flex items-center gap-2 text-[10px] text-[#64748B] font-semibold flex-wrap">
+                                  <span>{dateFormatted}</span>
+                                  <span>•</span>
+                                  <span>{durationFormatted}</span>
+                                  <span>•</span>
+                                  <span>{participantCount}</span>
+                                  <span>•</span>
+                                  <span>{actionItemCount}</span>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  onClick={() => togglePlayCall(m)}
+                                  className={`p-1.5 rounded-lg text-xs font-bold transition flex items-center justify-center ${
+                                    isCurrentlyPlaying && isAudioPlaying 
+                                      ? "bg-rose-50 text-rose-600 hover:bg-rose-100" 
+                                      : "bg-[#F0FDF4] text-[#10B981] hover:bg-[#E6FBF7]"
+                                  }`}
+                                  title="Play audio session"
+                                >
+                                  {isCurrentlyPlaying && isAudioPlaying ? <Pause size={13} /> : <Play size={13} />}
+                                </button>
+                                <button
+                                  onClick={() => openTranscriptDrawer(m)}
+                                  className="p-1.5 bg-white border border-[#E5E7EB] hover:bg-[#F8FAFC] text-[#64748B] rounded-lg transition"
+                                  title="View Transcript Drawer"
+                                >
+                                  <MessageSquare size={13} />
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Waveform Player Console (if playing) */}
+                            {isCurrentlyPlaying && (
+                              <div className="pt-2 border-t border-[#F1F5F9] space-y-1">
+                                <div className="flex items-center justify-between text-[9px] text-[#64748B] font-mono">
+                                  <span>{Math.floor(audioCurrentTime / 60)}:{(Math.floor(audioCurrentTime) % 60).toString().padStart(2, '0')}</span>
+                                  <span>{audioDuration ? `${Math.floor(audioDuration / 60)}:${(Math.floor(audioDuration) % 60).toString().padStart(2, '0')}` : "00:00"}</span>
+                                </div>
+                                {renderWaveformPeaks(m.id)}
+                              </div>
+                            )}
+
+                            {/* CRITICAL NAVIGATION LINK: View call details -> */}
+                            <div className="pt-2 border-t border-[#F1F5F9] flex items-center justify-between">
+                              <button
+                                onClick={() => {
+                                  if (onSelectMeeting) onSelectMeeting(m.id);
+                                }}
+                                className="text-[10px] font-semibold text-[#64748B] hover:text-[#0F172A]"
+                              >
+                                Review / Edit
+                              </button>
+                              <button
+                                onClick={() => {
+                                  if (onSelectMeetingDetails) {
+                                    onSelectMeetingDetails(m.id, selectedCompanyId);
+                                  } else if (onSelectMeeting) {
+                                    onSelectMeeting(m.id);
+                                  }
+                                }}
+                                className="text-xs font-extrabold text-[#0D9488] hover:underline flex items-center gap-1"
+                              >
+                                <span>View call details →</span>
+                              </button>
+                            </div>
+
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+
                 </div>
 
               </div>
@@ -1640,7 +1961,179 @@ ${prepNotes || "No agenda notes drafted."}
 
       </div>
 
-      {/* 13. PRE-CALL PREPARATION WORKSPACE MODAL/DRAWER */}
+      {/* ════════════════════════════════════════════════
+          MODALS & DRAWERS (ALL FUNCTIONALITIES PRESERVED)
+          ════════════════════════════════════════════════ */}
+
+      {/* 1. Add Commitment Modal */}
+      {showAddCommitmentModal && (
+        <div className="fixed inset-0 bg-[#0F172A]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50 text-left animate-in fade-in duration-150 select-none">
+          <div className="bg-white border border-[#E5E7EB] rounded-xl shadow-xl w-full max-w-md p-5 space-y-4">
+            <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-3">
+              <h3 className="text-sm font-extrabold text-[#0F172A]">Add New Commitment</h3>
+              <button onClick={() => setShowAddCommitmentModal(false)} className="text-[#64748B] hover:text-[#0F172A]">
+                <X size={15} />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateCommitment} className="space-y-3.5">
+              <div>
+                <label className="text-[10px] font-bold text-[#64748B] uppercase block mb-1">Commitment Type</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setNewCommitmentData(prev => ({ ...prev, type: "customer" }))}
+                    className={`py-1.5 px-3 rounded-lg text-xs font-bold border transition ${
+                      newCommitmentData.type === "customer"
+                        ? "bg-teal-50 border-teal-300 text-teal-800"
+                        : "bg-white border-[#E2E8F0] text-[#64748B]"
+                    }`}
+                  >
+                    Customer owes us
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setNewCommitmentData(prev => ({ ...prev, type: "rep" }))}
+                    className={`py-1.5 px-3 rounded-lg text-xs font-bold border transition ${
+                      newCommitmentData.type === "rep"
+                        ? "bg-teal-50 border-teal-300 text-teal-800"
+                        : "bg-white border-[#E2E8F0] text-[#64748B]"
+                    }`}
+                  >
+                    Our team owes customer
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-[10px] font-bold text-[#64748B] uppercase block mb-1">Task Description</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g., Send security questionnaire or schedule pilot..."
+                  value={newCommitmentData.task}
+                  onChange={(e) => setNewCommitmentData(prev => ({ ...prev, task: e.target.value }))}
+                  className="w-full bg-[#FAFBFB] border border-[#CBD5E1] rounded-lg px-3 py-1.5 text-xs text-[#0F172A] outline-none focus:border-[#10B981]"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[10px] font-bold text-[#64748B] uppercase block mb-1">Owner</label>
+                  <input
+                    type="text"
+                    placeholder={newCommitmentData.type === "customer" ? "Priya (VP Sales)" : "Sarah Chen"}
+                    value={newCommitmentData.owner}
+                    onChange={(e) => setNewCommitmentData(prev => ({ ...prev, owner: e.target.value }))}
+                    className="w-full bg-[#FAFBFB] border border-[#CBD5E1] rounded-lg px-3 py-1.5 text-xs text-[#0F172A] outline-none focus:border-[#10B981]"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold text-[#64748B] uppercase block mb-1">Due Date</label>
+                  <input
+                    type="text"
+                    placeholder="e.g., Oct 24 or Tomorrow"
+                    value={newCommitmentData.due_date}
+                    onChange={(e) => setNewCommitmentData(prev => ({ ...prev, due_date: e.target.value }))}
+                    className="w-full bg-[#FAFBFB] border border-[#CBD5E1] rounded-lg px-3 py-1.5 text-xs text-[#0F172A] outline-none focus:border-[#10B981]"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-[#F1F5F9]">
+                <button
+                  type="button"
+                  onClick={() => setShowAddCommitmentModal(false)}
+                  className="px-3 py-1.5 text-xs font-semibold text-[#64748B] hover:text-[#0F172A]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingCommitment || !newCommitmentData.task.trim()}
+                  className="px-4 py-1.5 bg-[#10B981] hover:bg-[#059669] text-white text-xs font-bold rounded-lg shadow-sm transition disabled:opacity-40"
+                >
+                  {savingCommitment ? "Adding..." : "Save Commitment"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* 2. Add Stakeholder Modal */}
+      {showAddStakeholderModal && (
+        <div className="fixed inset-0 bg-[#0F172A]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50 text-left animate-in fade-in duration-150 select-none">
+          <div className="bg-white border border-[#E5E7EB] rounded-xl shadow-xl w-full max-w-md p-5 space-y-4">
+            <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-3">
+              <h3 className="text-sm font-extrabold text-[#0F172A]">Add Committee Stakeholder</h3>
+              <button onClick={() => setShowAddStakeholderModal(false)} className="text-[#64748B] hover:text-[#0F172A]">
+                <X size={15} />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateStakeholder} className="space-y-3.5">
+              <div>
+                <label className="text-[10px] font-bold text-[#64748B] uppercase block mb-1">Full Name</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g., Jane Doe"
+                  value={newStakeholderData.name}
+                  onChange={(e) => setNewStakeholderData(prev => ({ ...prev, name: e.target.value }))}
+                  className="w-full bg-[#FAFBFB] border border-[#CBD5E1] rounded-lg px-3 py-1.5 text-xs text-[#0F172A] outline-none focus:border-[#10B981]"
+                />
+              </div>
+
+              <div>
+                <label className="text-[10px] font-bold text-[#64748B] uppercase block mb-1">Job Title</label>
+                <input
+                  type="text"
+                  placeholder="e.g., VP Finance, Head of Security..."
+                  value={newStakeholderData.job_title}
+                  onChange={(e) => setNewStakeholderData(prev => ({ ...prev, job_title: e.target.value }))}
+                  className="w-full bg-[#FAFBFB] border border-[#CBD5E1] rounded-lg px-3 py-1.5 text-xs text-[#0F172A] outline-none focus:border-[#10B981]"
+                />
+              </div>
+
+              <div>
+                <label className="text-[10px] font-bold text-[#64748B] uppercase block mb-1">Buying Authority</label>
+                <select
+                  value={newStakeholderData.decision_authority}
+                  onChange={(e) => setNewStakeholderData(prev => ({ ...prev, decision_authority: e.target.value }))}
+                  className="w-full bg-[#FAFBFB] border border-[#CBD5E1] rounded-lg px-3 py-1.5 text-xs text-[#0F172A] outline-none focus:border-[#10B981]"
+                >
+                  <option value="Champion">Champion</option>
+                  <option value="Economic Buyer">Economic Buyer</option>
+                  <option value="Technical Buyer">Technical Buyer</option>
+                  <option value="Procurement">Procurement</option>
+                  <option value="Security">Security</option>
+                  <option value="Stakeholder">Stakeholder</option>
+                </select>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-[#F1F5F9]">
+                <button
+                  type="button"
+                  onClick={() => setShowAddStakeholderModal(false)}
+                  className="px-3 py-1.5 text-xs font-semibold text-[#64748B] hover:text-[#0F172A]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingStakeholder || !newStakeholderData.name.trim()}
+                  className="px-4 py-1.5 bg-[#10B981] hover:bg-[#059669] text-white text-xs font-bold rounded-lg shadow-sm transition disabled:opacity-40"
+                >
+                  {savingStakeholder ? "Saving..." : "Save Stakeholder"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* 3. Pre-Call Preparation Workspace Modal */}
       {showPrepWorkspace && (
         <div className="fixed inset-0 bg-[#0F172A]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50 text-left animate-in fade-in duration-200 select-none">
           <div className="bg-white border border-[#E5E7EB] rounded-xl shadow-xl w-full max-w-4xl max-h-[85vh] flex flex-col overflow-hidden animate-in slide-in-from-bottom-4 duration-300">
@@ -1648,7 +2141,7 @@ ${prepNotes || "No agenda notes drafted."}
             <div className="p-4 border-b border-[#F1F5F9] bg-[#FAFBFB] flex items-center justify-between flex-shrink-0">
               <div>
                 <h3 className="text-sm font-extrabold text-[#0F172A] uppercase flex items-center gap-1.5">
-                  <Activity size={14} className="text-[#14B8A6]" /> Pre-Call Intelligence Workspace
+                  <Activity size={14} className="text-[#10B981]" /> Pre-Call Intelligence Workspace
                 </h3>
                 <p className="text-[10px] text-[#64748B] mt-0.5 font-bold">Prepare for next client call in under 60 seconds.</p>
               </div>
@@ -1663,7 +2156,7 @@ ${prepNotes || "No agenda notes drafted."}
             <div className="flex-grow overflow-y-auto p-6 space-y-6 bg-[#F8FAFC]">
               {prepLoading ? (
                 <div className="py-20 flex flex-col items-center justify-center gap-2">
-                  <Loader2 className="animate-spin text-[#14B8A6]" size={24} />
+                  <Loader2 className="animate-spin text-[#10B981]" size={24} />
                   <span className="text-xs text-[#64748B] font-semibold">Generating preparation dossier...</span>
                 </div>
               ) : prepData ? (
@@ -1693,7 +2186,7 @@ ${prepNotes || "No agenda notes drafted."}
                             <ul className="space-y-1.5">
                               {prepData.our_commitments?.map((c, i) => (
                                 <li key={i} className="flex items-start gap-1.5">
-                                  <span className="mt-1 h-1.5 w-1.5 rounded-full bg-[#14B8A6] flex-shrink-0" />
+                                  <span className="mt-1 h-1.5 w-1.5 rounded-full bg-[#10B981] flex-shrink-0" />
                                   <span>{c}</span>
                                 </li>
                               ))}
@@ -1709,7 +2202,7 @@ ${prepNotes || "No agenda notes drafted."}
                             <ul className="space-y-1.5">
                               {prepData.customer_commitments?.map((c, i) => (
                                 <li key={i} className="flex items-start gap-1.5">
-                                  <span className="mt-1 h-1.5 w-1.5 rounded-full bg-[#14B8A6] flex-shrink-0" />
+                                  <span className="mt-1 h-1.5 w-1.5 rounded-full bg-[#10B981] flex-shrink-0" />
                                   <span>{c}</span>
                                 </li>
                               ))}
@@ -1756,7 +2249,7 @@ ${prepNotes || "No agenda notes drafted."}
                         {savingNotes ? (
                           <span className="italic text-[9px] text-[#64748B]">Autosaving...</span>
                         ) : (
-                          <span className="text-[#14B8A6] text-[9px]">Saved</span>
+                          <span className="text-[#10B981] text-[9px]">Saved</span>
                         )}
                       </div>
                       
@@ -1764,12 +2257,12 @@ ${prepNotes || "No agenda notes drafted."}
                         placeholder="Draft final customized talking points to present..."
                         value={prepNotes}
                         onChange={(e) => handleNotesChange(e.target.value)}
-                        className="flex-grow w-full bg-[#F8FAFC] border border-[#E5E7EB] rounded-lg p-2.5 text-xs outline-none focus:border-[#14B8A6] focus:bg-white transition leading-relaxed font-semibold text-[#475569] resize-none"
+                        className="flex-grow w-full bg-[#F8FAFC] border border-[#E5E7EB] rounded-lg p-2.5 text-xs outline-none focus:border-[#10B981] focus:bg-white transition leading-relaxed font-semibold text-[#475569] resize-none"
                       />
 
                       <button
                         onClick={exportDossierToClipboard}
-                        className="mt-2 py-2 bg-white border border-[#E5E7EB] hover:bg-[#F8FAFC] text-[#14B8A6] text-xs font-bold rounded-lg transition flex items-center justify-center gap-1.5 shadow-2xs flex-shrink-0"
+                        className="mt-2 py-2 bg-white border border-[#E5E7EB] hover:bg-[#F8FAFC] text-[#10B981] text-xs font-bold rounded-lg transition flex items-center justify-center gap-1.5 shadow-2xs flex-shrink-0"
                       >
                         <Download size={12} />
                         <span>Copy Dossier</span>
@@ -1788,7 +2281,7 @@ ${prepNotes || "No agenda notes drafted."}
         </div>
       )}
 
-      {/* DRAWER: Slide-Out Transcript Drawer */}
+      {/* 4. Slide-Out Transcript Drawer */}
       {drawerMeetingId && (
         <div className="fixed inset-y-0 right-0 w-[450px] bg-white shadow-2xl border-l border-[#E2E8F0] z-50 flex flex-col overflow-hidden animate-fade-in text-left">
           <div className="p-4 border-b border-[#F1F5F9] bg-[#FAFBFB] flex items-center justify-between flex-shrink-0">
@@ -1812,7 +2305,7 @@ ${prepNotes || "No agenda notes drafted."}
                 placeholder="Search keywords inside transcript segments..."
                 value={transcriptSearch}
                 onChange={(e) => setTranscriptSearch(e.target.value)}
-                className="w-full bg-[#FAFBFB] border border-[#E2E8F0] rounded pl-8 pr-3 py-1 text-xs outline-none focus:border-[#14B8A6]"
+                className="w-full bg-[#FAFBFB] border border-[#E2E8F0] rounded pl-8 pr-3 py-1 text-xs outline-none focus:border-[#10B981]"
               />
             </div>
           </div>
@@ -1820,51 +2313,38 @@ ${prepNotes || "No agenda notes drafted."}
           <div className="flex-1 overflow-y-auto p-4 bg-[#FAFBFB] space-y-3 scroll-thin">
             {loadingDrawer ? (
               <div className="py-20 flex flex-col items-center justify-center gap-2">
-                <Loader2 className="animate-spin text-[#14B8A6]" size={16} />
+                <Loader2 className="animate-spin text-[#10B981]" size={16} />
                 <span className="text-xs text-[#64748B]">Parsing transcript timeline...</span>
               </div>
+            ) : filteredDrawerSegments.length === 0 ? (
+              <div className="text-center py-10 text-xs text-[#64748B] italic">No segments match search query.</div>
             ) : (
-              (() => {
-                const filtered = drawerSegments.filter(s => 
-                  (s.corrected_text || s.text || "").toLowerCase().includes(transcriptSearch.toLowerCase())
-                );
+              filteredDrawerSegments.map((seg, idx) => {
+                const minutes = Math.floor(seg.start_time / 60);
+                const seconds = Math.floor(seg.start_time % 60).toString().padStart(2, '0');
                 
-                if (filtered.length === 0) {
-                  return <div className="text-center py-10 text-xs text-[#64748B] italic">No segments match search query.</div>;
-                }
-
-                return filtered.map((seg, idx) => {
-                  const minutes = Math.floor(seg.start_time / 60);
-                  const seconds = Math.floor(seg.start_time % 60).toString().padStart(2, '0');
-                  
-                  return (
-                    <div 
-                      key={idx} 
-                      onClick={() => {
-                        if (playingCallId === drawerMeetingId && audioElRef.current) {
-                          audioElRef.current.currentTime = seg.start_time;
-                          setAudioCurrentTime(seg.start_time);
-                        }
-                      }}
-                      className="bg-white border border-[#E2E8F0] p-3 rounded shadow-3xs hover:border-[#14B8A6]/30 transition cursor-pointer"
-                    >
-                      <div className="flex items-center justify-between text-[9px] font-bold text-[#64748B] mb-1.5">
-                        <span className="text-[#14B8A6]">{seg.speaker_name || "Unknown Speaker"}</span>
-                        <span>{minutes}:{seconds}</span>
-                      </div>
-                      <p className="text-xs leading-relaxed text-[#475569] font-medium">
-                        {seg.corrected_text || seg.text}
-                      </p>
+                return (
+                  <div 
+                    key={idx} 
+                    onClick={() => handleSeekDrawerAudio(seg.start_time)}
+                    className="bg-white border border-[#E2E8F0] p-3 rounded shadow-3xs hover:border-[#10B981]/30 transition cursor-pointer"
+                  >
+                    <div className="flex items-center justify-between text-[9px] font-bold text-[#64748B] mb-1.5">
+                      <span className="text-[#10B981]">{seg.speaker_name || "Unknown Speaker"}</span>
+                      <span>{minutes}:{seconds}</span>
                     </div>
-                  );
-                });
-              })()
+                    <p className="text-xs leading-relaxed text-[#475569] font-medium">
+                      {seg.corrected_text || seg.text}
+                    </p>
+                  </div>
+                );
+              })
             )}
           </div>
         </div>
       )}
 
-      {/* FACT HISTORY EVOLUTION MODAL */}
+      {/* 5. Fact History Evolution Modal */}
       {activeFactHistory && (
         <div className="fixed inset-0 bg-[#0F172A]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50 text-left animate-in fade-in duration-200 select-none">
           <div className="bg-white border border-[#E5E7EB] rounded-xl shadow-xl w-full max-w-md max-h-[70vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-150">
@@ -1885,7 +2365,7 @@ ${prepNotes || "No agenda notes drafted."}
                 activeFactHistory.history.map((m, idx) => (
                   <div key={idx} className="bg-white border border-[#E5E7EB] p-3 rounded shadow-3xs flex flex-col gap-1">
                     <div className="flex justify-between items-center text-[9px] text-[#64748B]">
-                      <span className="font-bold text-[#14B8A6]">{m.meeting_title || "Call Session"}</span>
+                      <span className="font-bold text-[#10B981]">{m.meeting_title || "Call Session"}</span>
                       <span>{new Date(m.created_at || m.date).toLocaleDateString()}</span>
                     </div>
                     <p className="text-xs font-extrabold text-[#334155] mt-1">Value: "{m.value}"</p>
@@ -1898,7 +2378,7 @@ ${prepNotes || "No agenda notes drafted."}
         </div>
       )}
 
-      {/* Stakeholder Mentions modal */}
+      {/* 6. Stakeholder Mentions Modal */}
       {activeStakeholder && (
         <div className="fixed inset-0 bg-[#0F172A]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50 text-left animate-in fade-in duration-200">
           <div className="bg-white border border-[#E5E7EB] rounded-xl shadow-xl w-full max-w-xl max-h-[70vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-150">
@@ -1915,7 +2395,7 @@ ${prepNotes || "No agenda notes drafted."}
             <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-[#FAFBFB]">
               {loadingMentions ? (
                 <div className="py-12 flex flex-col items-center justify-center gap-2">
-                  <Loader2 className="animate-spin text-[#14B8A6]" size={16} />
+                  <Loader2 className="animate-spin text-[#10B981]" size={16} />
                   <span className="text-xs text-[#64748B] font-semibold font-mono">Searching transcripts...</span>
                 </div>
               ) : stakeholderMentions.length === 0 ? (
@@ -1924,7 +2404,7 @@ ${prepNotes || "No agenda notes drafted."}
                 stakeholderMentions.map((m, idx) => (
                   <div key={idx} className="bg-white border border-[#E5E7EB] p-3 rounded shadow-3xs">
                     <div className="flex items-center justify-between text-[9px] font-bold text-[#64748B] mb-1">
-                      <span className="text-[#14B8A6]">{m.meeting_title}</span>
+                      <span className="text-[#10B981]">{m.meeting_title}</span>
                       <span>{Math.floor(m.start_time / 60)}:{(Math.floor(m.start_time) % 60).toString().padStart(2, '0')}</span>
                     </div>
                     <p className="text-xs leading-relaxed text-[#475569] italic">"{m.text}"</p>

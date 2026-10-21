@@ -73,11 +73,6 @@ export default function ReviewCenter({
     setTimeout(() => setToastMessage(null), 4000);
   };
 
-  // Fetch live system integration & sync data
-  useEffect(() => {
-    fetchData();
-  }, [meetings]);
-
   const fetchData = async () => {
     try {
       const [intRes, syncRes, actRes] = await Promise.all([
@@ -92,6 +87,11 @@ export default function ReviewCenter({
       console.error("Failed to fetch dashboard data:", err);
     }
   };
+
+  // Fetch live system integration & sync data
+  useEffect(() => {
+    fetchData();
+  }, [meetings]);
 
   // Quick Preview handler
   const handleOpenPreview = async (meetingId) => {

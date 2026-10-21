@@ -316,9 +316,42 @@ export class MeetingBotWorker {
     // If live transcript segments were captured directly from the meeting room, persist them now with platform attribution
     if (Array.isArray(capturedSegments) && capturedSegments.length > 0) {
       const registry = new ParticipantRegistry(meetingId);
+      // Dynamically resolve workspace internal domains (PS-011)
+      let workspaceDomains = [];
+      let workspaceOrg = 'PulseSync';
+      if (job.workspace_id) {
+        try {
+          if (!this.useFallbackDb) {
+            const wsRes = await this.pool.query('SELECT name, domain FROM workspaces WHERE id = $1', [job.workspace_id]);
+            if (wsRes.rows.length > 0) {
+              if (wsRes.rows[0].domain) workspaceDomains.push(wsRes.rows[0].domain);
+              if (wsRes.rows[0].name) workspaceOrg = wsRes.rows[0].name;
+            }
+          } else {
+            const data = this.readFallbackDb();
+            const ws = (data.workspaces || []).find(w => w.id === job.workspace_id);
+            if (ws) {
+              if (ws.domain) workspaceDomains.push(ws.domain);
+              if (ws.name) workspaceOrg = ws.name;
+            }
+          }
+        } catch (wsErr) {
+          this.logger.warn({ error: wsErr?.message }, 'Failed to query workspace domain for RoleResolver');
+        }
+      }
+      if (process.env.WORKSPACE_INTERNAL_DOMAINS) {
+        process.env.WORKSPACE_INTERNAL_DOMAINS.split(',').forEach(d => {
+          const trimmed = d.trim();
+          if (trimmed && !workspaceDomains.includes(trimmed)) workspaceDomains.push(trimmed);
+        });
+      }
+      if (workspaceDomains.length === 0) {
+        workspaceDomains = ['pulsesync.ai', 'pulsesync.com'];
+      }
+
       const roleResolver = new RoleResolver({
-        internalDomains: ['pulsesync.ai', 'pulsesync.com'],
-        defaultInternalOrg: 'PulseSync'
+        internalDomains: workspaceDomains,
+        defaultInternalOrg: workspaceOrg
       });
 
       // 1. Register Bot participant

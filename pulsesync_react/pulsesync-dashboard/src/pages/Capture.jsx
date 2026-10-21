@@ -91,11 +91,12 @@ function ActivityLogModal({ job, onClose }) {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const jobId = job?.id;
 
   const fetchLogs = useCallback(async () => {
-    if (!job?.id) return;
+    if (!jobId) return;
     try {
-      const res = await fetch(`${API_URL}/api/meeting-bots/${job.id}/logs`);
+      const res = await fetch(`${API_URL}/api/meeting-bots/${jobId}/logs`);
       if (res.ok) {
         const data = await res.json();
         setLogs(data);
@@ -105,7 +106,7 @@ function ActivityLogModal({ job, onClose }) {
     } finally {
       setLoading(false);
     }
-  }, [job?.id]);
+  }, [jobId]);
 
   useEffect(() => {
     fetchLogs();

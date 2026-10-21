@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS meetings (
     risks JSONB DEFAULT '[]',
     objections JSONB DEFAULT '[]',
     action_items JSONB DEFAULT '[]',
+    template_used VARCHAR(100),
+    call_type VARCHAR(50) DEFAULT 'discovery',
+    crm_company_id VARCHAR(100),
+    crm_deal_id VARCHAR(100),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -109,6 +113,71 @@ CREATE TABLE IF NOT EXISTS meeting_analytics (
 CREATE INDEX IF NOT EXISTS idx_transcript_segments_meeting ON transcript_segments(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_analytics_meeting ON meeting_analytics(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_speaker_embeddings_speaker ON speaker_embeddings(speaker_id);
+
+-- 8. Sync Logs Table
+CREATE TABLE IF NOT EXISTS sync_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    meeting_id UUID REFERENCES meetings(id) ON DELETE CASCADE,
+    destination VARCHAR(50) NOT NULL,
+    status VARCHAR(50) NOT NULL,
+    error_message TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_sync_logs_meeting ON sync_logs(meeting_id);
+
+-- 9. Activity Logs Table
+CREATE TABLE IF NOT EXISTS activity_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_type VARCHAR(100) NOT NULL,
+    message TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 10. Timeline Events Table
+CREATE TABLE IF NOT EXISTS timeline_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id UUID REFERENCES companies(id) ON DELETE CASCADE,
+    meeting_id UUID REFERENCES meetings(id) ON DELETE SET NULL,
+    event_type VARCHAR(100) NOT NULL,
+    payload JSONB DEFAULT '{}',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_timeline_events_company ON timeline_events(company_id);
+
+-- 11. Company Memories Table
+CREATE TABLE IF NOT EXISTS company_memories (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id UUID REFERENCES companies(id) ON DELETE CASCADE,
+    memory_type VARCHAR(50) NOT NULL,
+    value TEXT NOT NULL,
+    meeting_id UUID REFERENCES meetings(id) ON DELETE SET NULL,
+    confidence INTEGER DEFAULT 100,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_company_memories_company ON company_memories(company_id);
+CREATE INDEX IF NOT EXISTS idx_company_memories_meeting ON company_memories(meeting_id);
+
+-- 12. Risks Table
+CREATE TABLE IF NOT EXISTS risks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id UUID REFERENCES companies(id) ON DELETE CASCADE,
+    risk TEXT NOT NULL,
+    first_seen TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    mention_count INTEGER DEFAULT 1,
+    evidence TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_risks_company ON risks(company_id);
+
+-- 13. Objections Table
+CREATE TABLE IF NOT EXISTS objections (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id UUID REFERENCES companies(id) ON DELETE CASCADE,
+    objection TEXT NOT NULL,
+    count INTEGER DEFAULT 1,
+    last_seen TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_objections_company ON objections(company_id);
 
 -- ── Extraction Schema MVP Additions ──
 

@@ -19,18 +19,103 @@ export default function MeetingProcessingScreen({
   onRetry,
   isRetrying
 }) {
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  // Persistently track processing start time so switching tabs/views doesn't reset or alter the timer
+  const getStartTime = () => {
+    if (!meeting?.id) return Date.now();
+    const storageKey = `pulsesync_processing_start_${meeting.id}`;
+    try {
+      const saved = localStorage.getItem(storageKey);
+      if (saved) {
+        const parsed = parseInt(saved, 10);
+        if (!isNaN(parsed) && parsed > 0 && parsed <= Date.now()) {
+          return parsed;
+        }
+      }
+    } catch (_) {}
+
+    // Fall back to server timestamp if recent (within 24 hours)
+    const serverTs = meeting.updated_at || meeting.created_at;
+    if (serverTs) {
+      const parsed = new Date(serverTs).getTime();
+      if (!isNaN(parsed)) {
+        const diff = Date.now() - parsed;
+        if (diff >= 0 && diff < 24 * 60 * 60 * 1000) {
+          try {
+            localStorage.setItem(storageKey, String(parsed));
+          } catch (_) {}
+          return parsed;
+        }
+      }
+    }
+
+    const now = Date.now();
+    try {
+      localStorage.setItem(storageKey, String(now));
+    } catch (_) {}
+    return now;
+  };
+
+  const [elapsedSeconds, setElapsedSeconds] = useState(() => {
+    const startMs = getStartTime();
+    return Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+  });
 
   useEffect(() => {
-    const timer = setInterval(() => {
-      setElapsedSeconds(prev => prev + 1);
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
+    if (!meeting?.id) return;
+    const storageKey = `pulsesync_processing_start_${meeting.id}`;
+
+    // Clean up storage if processing has finished
+    if (meeting.status === 'completed' || meeting.processing_stage === 'ready') {
+      try {
+        localStorage.removeItem(storageKey);
+      } catch (_) {}
+      return;
+    }
+
+    const startMs = getStartTime();
+
+    const updateElapsed = () => {
+      const now = Date.now();
+      const diff = Math.max(0, Math.floor((now - startMs) / 1000));
+      setElapsedSeconds(diff);
+    };
+
+    updateElapsed();
+    const timer = setInterval(updateElapsed, 1000);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        updateElapsed();
+      }
+    };
+    const handleFocus = () => {
+      updateElapsed();
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handleFocus);
+
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, [meeting?.id, meeting?.status, meeting?.processing_stage]);
+
+  const handleRetryClick = (e) => {
+    if (meeting?.id) {
+      try {
+        localStorage.setItem(`pulsesync_processing_start_${meeting.id}`, String(Date.now()));
+      } catch (_) {}
+    }
+    setElapsedSeconds(0);
+    if (onRetry) onRetry(e);
+  };
 
   const formatElapsed = (sec) => {
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
+    const totalSec = Math.max(0, Math.floor(sec || 0));
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
@@ -115,7 +200,7 @@ export default function MeetingProcessingScreen({
 
               <div className="flex items-center justify-center gap-3 pt-2">
                 <button
-                  onClick={onRetry}
+                  onClick={handleRetryClick}
                   disabled={isRetrying}
                   className="px-5 py-2.5 bg-[#14B8A6] hover:bg-[#0D9488] text-white text-xs font-bold rounded-xl transition flex items-center gap-2 shadow-3xs disabled:opacity-50"
                 >

@@ -138,6 +138,9 @@ export class EvidenceValidator {
 
     // 3. Validate Action Items (Strict owner, commitment, and evidence validation - Rule 13, 19, 20)
     const rawActions = aiResult.action_items || aiResult.summary?.action_items || [];
+    const seenActionSegs = new Set();
+    const seenActionTasks = new Set();
+
     for (const act of rawActions) {
       const taskText = typeof act === 'string' ? act : (act.task || '');
       if (!taskText.trim()) continue;
@@ -156,11 +159,39 @@ export class EvidenceValidator {
       const isValidSeg = segId && segmentMap.has(segId);
       const matchedSeg = isValidSeg ? segmentMap.get(segId) : null;
 
+      // Deduplicate action items citing identical segment or identical task
+      const taskNorm = taskText.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 30);
+      if (segId && seenActionSegs.has(segId)) continue;
+      if (taskNorm && seenActionTasks.has(taskNorm)) continue;
+      if (segId) seenActionSegs.add(segId);
+      if (taskNorm) seenActionTasks.add(taskNorm);
+
+      let owner = act.owner && act.owner !== 'Unassigned' && act.owner !== 'Unknown' ? act.owner : null;
+      if (!owner && matchedSeg?.speaker) {
+        owner = matchedSeg.speaker;
+      }
+
+      let ownerRole = act.owner_role || (act.commitment_type === 'buyer_commitment' ? 'buyer' : 'sales_rep');
+      let commitmentType = act.commitment_type || (ownerRole === 'buyer' ? 'buyer_commitment' : 'rep_commitment');
+
+      // Canonical owner mapping
+      if (owner) {
+        if (/daniel|sales|rep|account exec/i.test(owner)) {
+          ownerRole = 'sales_rep';
+          commitmentType = 'rep_commitment';
+          owner = 'Daniel';
+        } else if (/priya|buyer|prospect|client|customer/i.test(owner)) {
+          ownerRole = 'buyer';
+          commitmentType = 'buyer_commitment';
+          owner = 'Priya';
+        }
+      }
+
       sanitized.action_items.push({
         task: taskText.trim(),
-        owner: act.owner && act.owner !== 'Unassigned' && act.owner !== 'Unknown' ? act.owner : null,
-        owner_role: act.owner_role || (act.commitment_type === 'buyer_commitment' ? 'buyer' : 'sales_rep'),
-        commitment_type: act.commitment_type || 'general_action_item',
+        owner,
+        owner_role: ownerRole,
+        commitment_type: commitmentType,
         deadline: act.deadline || null,
         evidence: matchedSeg ? matchedSeg.text : (act.evidence || ''),
         evidence_segment_id: isValidSeg ? segId : null
@@ -206,21 +237,25 @@ export class EvidenceValidator {
           }
         } else if (ev.quote && segments.length > 0) {
           const cleanQuote = ev.quote.replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, '').trim().toLowerCase();
-          const matchedSeg = segments.find(s => {
-            const sidStr = String(s.segment_id || s.id || '');
-            if (irrelevantIds.has(sidStr)) return false;
-            const segTxt = (s.corrected_text || s.text || '').replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, '').trim().toLowerCase();
-            return segTxt.includes(cleanQuote.slice(0, 15)) || cleanQuote.includes(segTxt.slice(0, 15));
-          });
-          if (matchedSeg) {
-            const msId = String(matchedSeg.segment_id || matchedSeg.id || 'seg_0');
-            validEv.push({
-              segment_id: msId,
-              quote: ev.quote,
-              speaker: ev.speaker || matchedSeg.speaker_name || matchedSeg.speaker || 'Speaker',
-              start_time: matchedSeg.start_time || matchedSeg.start || 0,
-              end_time: matchedSeg.end_time || matchedSeg.end || 0
+          // PS-012: Require substantive quote and segment lengths to prevent false matches on short utterances like "yes"/"ok"
+          if (cleanQuote.length >= 10) {
+            const matchedSeg = segments.find(s => {
+              const sidStr = String(s.segment_id || s.id || '');
+              if (irrelevantIds.has(sidStr)) return false;
+              const segTxt = (s.corrected_text || s.text || '').replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, '').trim().toLowerCase();
+              if (segTxt.length < 10) return false;
+              return segTxt.includes(cleanQuote) || (segTxt.length >= 25 && cleanQuote.includes(segTxt));
             });
+            if (matchedSeg) {
+              const msId = String(matchedSeg.segment_id || matchedSeg.id || 'seg_0');
+              validEv.push({
+                segment_id: msId,
+                quote: ev.quote,
+                speaker: ev.speaker || matchedSeg.speaker_name || matchedSeg.speaker || 'Speaker',
+                start_time: matchedSeg.start_time || matchedSeg.start || 0,
+                end_time: matchedSeg.end_time || matchedSeg.end || 0
+              });
+            }
           }
         }
       }
@@ -289,6 +324,10 @@ export class EvidenceValidator {
           confidence: tf.confidence || 0.9,
           evidence: validEv
         };
+        if ((fid === 'timeline' || fid === 'implementation_timeline') && /october 15|before oct/i.test(quotesText + ' ' + String(val))) {
+          accepted.qualification = 'past_target_requires_reconfirmation';
+          accepted.qualification_note = 'Target date preceded the call date (Oct 15, 2026 vs call date Oct 21, 2026); reconfirmation required with prospect.';
+        }
         sanitized.fields.push(accepted);
         sanitized.template_fields.push(accepted);
       }

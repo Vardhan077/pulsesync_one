@@ -202,8 +202,10 @@ export default function DynamicReviewWorkspace({
   };
 
   return (
-    <div className="space-y-4 pb-24 text-[#0F172A]">
-      {/* 1. Review overview header */}
+    <div className="flex-1 min-h-0 flex flex-col overflow-hidden text-[#0F172A]">
+      {/* Scrollable Review Content */}
+      <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-4">
+        {/* 1. Review overview header */}
       <section className="rounded-xl border border-[#E2E8F0] bg-white overflow-hidden shadow-3xs">
         <div className="px-5 py-4 flex flex-col xl:flex-row xl:items-center gap-5">
           <div className="min-w-0 flex-1">
@@ -531,9 +533,10 @@ export default function DynamicReviewWorkspace({
           </div>
         )}
       </section>
+      </div>
 
-      {/* Sticky review gate */}
-      <div className="fixed bottom-0 left-0 right-0 z-30 border-t border-[#E2E8F0] bg-white/95 backdrop-blur px-5 py-2.5">
+      {/* Review gate footer pinned to review workspace bottom without overlapping sidebar */}
+      <div className="flex-shrink-0 border-t border-[#E2E8F0] bg-white/95 backdrop-blur px-5 py-2.5 z-10 shadow-sm">
         <div className="mx-auto max-w-[1500px] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
           <div>
             <div className="text-[10px] font-bold">

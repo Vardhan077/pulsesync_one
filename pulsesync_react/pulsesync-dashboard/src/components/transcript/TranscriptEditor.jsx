@@ -293,16 +293,14 @@ export default function TranscriptEditor({
     return text;
   };
 
-  const totalDuration = useMemo(() => {
-    if (duration && duration > 0) return duration;
-    if (!segments || segments.length === 0) return 0;
-    return segments[segments.length - 1]?.end_time || 0;
-  }, [segments, duration]);
+  const totalDuration = duration && duration > 0
+    ? duration
+    : (segments && segments.length > 0 ? (segments[segments.length - 1]?.end_time || 0) : 0);
 
-  const firstSpeechTime = useMemo(() => {
-    const first = segments.find(s => (s.text || s.corrected_text || '').trim().length > 0);
+  const firstSpeechTime = (() => {
+    const first = (segments || []).find(s => (s.text || s.corrected_text || '').trim().length > 0);
     return first ? Number(first.start_time) || 0 : 0;
-  }, [segments]);
+  })();
 
   return (
     <div className="flex flex-col gap-4">

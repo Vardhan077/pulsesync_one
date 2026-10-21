@@ -16,9 +16,10 @@ export class SyncEngine {
     };
   }
 
-  _buildHubSpotUrl(type, id, portalId = '247215704') {
+  _buildHubSpotUrl(type, id, portalId = '') {
     if (!id) return null;
-    const pId = portalId || '247215704';
+    const pId = portalId || process.env.HUBSPOT_PORTAL_ID || '';
+    if (!pId) return null;
     const typeMap = {
       contact: '0-1',
       company: '0-2',
@@ -127,7 +128,7 @@ export class SyncEngine {
 
     // Default baseline field mappings for HubSpot
     const defaultMappings = [
-      { playbook_field_name: 'metrics', destination_object: 'deal', destination_field_name: 'amount' },
+      { playbook_field_name: 'metrics', destination_object: 'deal', destination_field_name: 'pulsesync_metrics' },
       { playbook_field_name: 'budget', destination_object: 'deal', destination_field_name: 'amount' },
       { playbook_field_name: 'economic_buyer', destination_object: 'deal', destination_field_name: 'pulsesync_economic_buyer' },
       { playbook_field_name: 'economic buyer', destination_object: 'deal', destination_field_name: 'pulsesync_economic_buyer' },
@@ -213,7 +214,7 @@ export class SyncEngine {
       summary = (data.summaries || []).find(s => s.meeting_id === meetingId) || {};
     }
 
-    const targetPortalId = portalId || integration?.auth_metadata?.portal_id || '247215704';
+    const targetPortalId = portalId || integration?.auth_metadata?.portal_id || integration?.auth_metadata?.account_name || process.env.HUBSPOT_PORTAL_ID || '';
 
     // 2. Resolve or search CRM records (Company, Contact, Deal)
     const companyDomain = company?.website ? company.website.replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0] : '';
@@ -405,7 +406,26 @@ export class SyncEngine {
     const idempotencyKey =
       payload.idempotencyKey || `sync_${meetingId}_${integrationId}`;
 
-    const targetPortalId = '247215704';
+    let targetPortalId = '';
+    try {
+      if (!this.useFallbackDb) {
+        const intRes = await this.pool.query('SELECT auth_metadata FROM integrations WHERE id = $1', [integrationId]);
+        if (intRes.rows.length > 0) {
+          targetPortalId = intRes.rows[0].auth_metadata?.portal_id || intRes.rows[0].auth_metadata?.account_name || '';
+        }
+      } else {
+        const data = this.readFallbackDb();
+        const intg = (data.integrations || []).find(i => i.id === integrationId);
+        if (intg) {
+          targetPortalId = intg.auth_metadata?.portal_id || intg.auth_metadata?.account_name || '';
+        }
+      }
+    } catch {
+      targetPortalId = '';
+    }
+    if (!targetPortalId) {
+      targetPortalId = process.env.HUBSPOT_PORTAL_ID || '';
+    }
 
     // 1. Check existing sync state before CRM writes (PostgreSQL or Fallback DB)
     if (!this.useFallbackDb) {
@@ -1012,7 +1032,7 @@ ${actionsHtml}
           taskIds: syncedTaskIds,
           noteId
         },
-        hubspotUrl: hubspotDealUrl || hubspotCompanyUrl || this._buildHubSpotUrl('deal', dealId, resolvedPortalId) || `https://app.hubspot.com/contacts/${resolvedPortalId}/record/0-2/${companyId || ''}`,
+        hubspotUrl: hubspotDealUrl || hubspotCompanyUrl || this._buildHubSpotUrl('deal', dealId, resolvedPortalId) || (resolvedPortalId ? `https://app.hubspot.com/contacts/${resolvedPortalId}/record/0-2/${companyId || ''}` : null),
         items: approvedDiffs.map(diff => ({
           destinationObject: diff.destinationObject,
           destinationField: diff.destinationField,

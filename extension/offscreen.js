@@ -35,16 +35,26 @@ async function start(config) {
   report('capturing', null);
 
   try {
-    // 1. Capture browser tab audio
-    tabStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        mandatory: {
+    // 1. Capture browser tab audio using modern constraints with mandatory fallback
+    try {
+      tabStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
           chromeMediaSource: 'tab',
           chromeMediaSourceId: config.streamId,
         },
-      },
-      video: false,
-    });
+        video: false,
+      });
+    } catch {
+      tabStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          mandatory: {
+            chromeMediaSource: 'tab',
+            chromeMediaSourceId: config.streamId,
+          },
+        },
+        video: false,
+      });
+    }
 
     // 2. Try capturing local microphone audio
     try {
