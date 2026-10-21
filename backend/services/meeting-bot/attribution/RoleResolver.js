@@ -15,11 +15,20 @@ export class RoleResolver {
    * @param {string} [options.defaultInternalOrg='PulseSync']
    */
   constructor(options = {}) {
-    this.internalDomains = (options.internalDomains || ['pulsesync.ai', 'pulsesync.com'])
+    const envDomains = process.env.WORKSPACE_INTERNAL_DOMAINS 
+      ? process.env.WORKSPACE_INTERNAL_DOMAINS.split(',').map(s => s.trim()).filter(Boolean)
+      : null;
+    const defaultDomains = envDomains && envDomains.length > 0 ? envDomains : ['pulsesync.ai', 'pulsesync.com'];
+    const configuredDomains = options.internalDomains && options.internalDomains.length > 0
+      ? options.internalDomains
+      : defaultDomains;
+
+    this.internalDomains = configuredDomains
+      .filter(Boolean)
       .map(d => d.toLowerCase().replace(/^@/, ''));
     this.crmContacts = options.crmContacts || [];
     this.crmTeamMembers = options.crmTeamMembers || [];
-    this.defaultInternalOrg = options.defaultInternalOrg || 'PulseSync';
+    this.defaultInternalOrg = options.defaultInternalOrg || process.env.WORKSPACE_ORGANIZATION_NAME || 'PulseSync';
   }
 
   /**

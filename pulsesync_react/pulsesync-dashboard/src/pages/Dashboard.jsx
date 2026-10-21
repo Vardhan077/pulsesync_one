@@ -11,9 +11,12 @@ import MeetingProcessingScreen from "../components/processing/MeetingProcessingS
 import Analytics from "./Analytics";
 import Capture from "./Capture";
 import DynamicReviewWorkspace from "../components/review/DynamicReviewWorkspace";
+import AdvancedFiltersPanel, { DEFAULT_ADVANCED_FILTERS } from "../components/review/AdvancedFiltersPanel";
+import CallDetails from "./CallDetails";
 
 import {
   Sparkles,
+  SlidersHorizontal,
   Calendar,
   Clock,
   AlertCircle,
@@ -107,18 +110,6 @@ const getEvidenceDetails = (evidence, segments = []) => {
 export default function Dashboard() {
   const API_URL = import.meta.env.VITE_API_URL || (typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.hostname}:3001` : "http://localhost:3001");
 
-  // Dynamic profile catalogue. Existing static templates remain available as a fallback.
-  useEffect(() => {
-    let cancelled = false;
-    fetch(`${API_URL}/api/extraction-profiles`)
-      .then((res) => (res.ok ? res.json() : []))
-      .then((profiles) => {
-        if (!cancelled && Array.isArray(profiles)) setExtractionProfiles(profiles);
-      })
-      .catch(() => { /* static templates remain available */ });
-    return () => { cancelled = true; };
-  }, [API_URL]);
-
   const [meetings, setMeetings] = useState([]);
   const [selectedMeetingId, setSelectedMeetingId] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -139,6 +130,13 @@ export default function Dashboard() {
       }
     }
     return 'review_center';
+  });
+  const [selectedCompanyId, setSelectedCompanyId] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('companyId') || null;
+    }
+    return null;
   });
   const [meetingDetails, setMeetingDetails] = useState(null);
 
@@ -165,6 +163,18 @@ export default function Dashboard() {
   const [extractionProfiles, setExtractionProfiles] = useState([]);
   const [dynamicSummarySections, setDynamicSummarySections] = useState([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+
+  // Dynamic profile catalogue. Existing static templates remain available as a fallback.
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_URL}/api/extraction-profiles`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((profiles) => {
+        if (!cancelled && Array.isArray(profiles)) setExtractionProfiles(profiles);
+      })
+      .catch(() => { /* static templates remain available */ });
+    return () => { cancelled = true; };
+  }, [API_URL]);
 
   // Call Type State (First-Class Metadata)
   const [currentCallType, setCurrentCallType] = useState("discovery");
@@ -214,6 +224,8 @@ export default function Dashboard() {
   const [selectedCompanyFilter, setSelectedCompanyFilter] = useState("all");
   const [selectedPlaybookFilter, setSelectedPlaybookFilter] = useState("all");
   const [queueSearchQuery, setQueueSearchQuery] = useState("");
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+  const [appliedAdvancedFilters, setAppliedAdvancedFilters] = useState(DEFAULT_ADVANCED_FILTERS);
 
   const [isInsufficientTranscript, setIsInsufficientTranscript] = useState(false);
   const [isEvidenceDrawerOpen, setIsEvidenceDrawerOpen] = useState(false);
@@ -273,30 +285,47 @@ export default function Dashboard() {
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const url = new URL(window.location.href);
-      if (selectedMeetingId) {
+      if (viewMode === 'call_details' && selectedMeetingId) {
+        url.searchParams.set('view', 'call_details');
+        url.searchParams.set('meetingId', selectedMeetingId);
+        if (selectedCompanyId) url.searchParams.set('companyId', selectedCompanyId);
+        else url.searchParams.delete('companyId');
+      } else if (selectedMeetingId) {
         localStorage.setItem('pulsesync_selected_meeting_id', selectedMeetingId);
         url.searchParams.set('meetingId', selectedMeetingId);
         url.searchParams.set('view', viewMode);
+        if (selectedCompanyId) url.searchParams.set('companyId', selectedCompanyId);
+        else url.searchParams.delete('companyId');
       } else {
         localStorage.removeItem('pulsesync_selected_meeting_id');
         url.searchParams.delete('meetingId');
-        if (viewMode !== 'board') {
-          url.searchParams.set('view', viewMode);
+        if (viewMode === 'customers' && selectedCompanyId) {
+          url.searchParams.set('view', 'customers');
+          url.searchParams.set('companyId', selectedCompanyId);
         } else {
-          url.searchParams.delete('view');
+          if (viewMode !== 'board') {
+            url.searchParams.set('view', viewMode);
+          } else {
+            url.searchParams.delete('view');
+          }
+          if (viewMode !== 'customers') {
+            url.searchParams.delete('companyId');
+          }
         }
       }
       window.history.replaceState({}, '', url.toString());
     }
-  }, [selectedMeetingId, viewMode]);
+  }, [selectedMeetingId, viewMode, selectedCompanyId]);
 
   useEffect(() => {
     const handlePopState = () => {
       const params = new URLSearchParams(window.location.search);
       const mId = params.get('meetingId');
       const view = params.get('view') || (mId ? 'board' : 'review_center');
+      const cId = params.get('companyId');
       setSelectedMeetingId(mId || null);
       setViewMode(view);
+      if (cId) setSelectedCompanyId(cId);
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
@@ -315,7 +344,6 @@ export default function Dashboard() {
   const [dealIntelligence, setDealIntelligence] = useState({});
 
   // Global Search and Company Selection states
-  const [selectedCompanyId, setSelectedCompanyId] = useState(null);
   const [existingCompanies, setExistingCompanies] = useState([]);
   const [companySelectMode, setCompanySelectMode] = useState("existing"); // "existing" | "new"
   const [companySearchFilter, setCompanySearchFilter] = useState("");
@@ -490,7 +518,8 @@ export default function Dashboard() {
       const isSynced = json.meeting?.workflow_state === 'synced';
       if (latestRun && (latestRun.status === 'succeeded' || isSynced)) {
         const records = latestRun.destination_record_ids || {};
-        const targetPortalId = '247215704';
+        const connectedCrm = integrationsList.find(i => i.connection_status === 'connected');
+        const targetPortalId = latestRun.portal_id || connectedCrm?.auth_metadata?.portal_id || connectedCrm?.auth_metadata?.account_name || '';
         const items = latestRun.items || [];
         const fieldsUpdatedCount = items.length;
         const compId = records.companyId || json.meeting?.crm_company_id;
@@ -511,16 +540,16 @@ export default function Dashboard() {
             company: {
               id: compId,
               name: json.meeting?.company_name || json.company?.name || 'Enterprise Account',
-              url: compId ? `https://app.hubspot.com/contacts/${targetPortalId}/record/0-2/${compId}` : null
+              url: compId && targetPortalId ? `https://app.hubspot.com/contacts/${targetPortalId}/record/0-2/${compId}` : null
             },
             deal: {
               id: dlId,
               name: `${json.meeting?.company_name || json.company?.name || 'Enterprise'} - Enterprise Expansion`,
-              url: dlId ? `https://app.hubspot.com/contacts/${targetPortalId}/record/0-3/${dlId}` : null
+              url: dlId && targetPortalId ? `https://app.hubspot.com/contacts/${targetPortalId}/record/0-3/${dlId}` : null
             },
             contact: {
               id: records.contactId || null,
-              url: records.contactId ? `https://app.hubspot.com/contacts/${targetPortalId}/record/0-1/${records.contactId}` : null
+              url: records.contactId && targetPortalId ? `https://app.hubspot.com/contacts/${targetPortalId}/record/0-1/${records.contactId}` : null
             },
             contactsCount: records.contactId ? 1 : (records.contactsCount || 0),
             tasksCount: Array.isArray(records.taskIds) ? records.taskIds.length : (records.tasksCount || 0),
@@ -981,7 +1010,7 @@ export default function Dashboard() {
         if (selectedMeetingId) {
           try {
             const response = await fetch(`${API_URL}/api/meetings/${selectedMeetingId}/audio-url`);
-            if (!response.ok) throw new Error("Could not generate a private audio URL");
+            if (!response.ok) throw new Error("Could not generate a private audio URL", { cause: err });
             const payload = await response.json();
             const fallbackUrl = payload.url.startsWith("http") ? payload.url : `${API_URL}${payload.url}`;
             setAudioSrc(fallbackUrl);
@@ -1022,6 +1051,23 @@ export default function Dashboard() {
         audioRef.current.src = fallbackUrl;
         audioRef.current.load();
       }
+    }
+  };
+
+  const handleChangeSpeed = (spd) => {
+    setPlaybackSpeed(spd);
+    if (audioRef.current) audioRef.current.playbackRate = spd;
+  };
+
+  const handleVolumeChange = (v) => {
+    setAudioVolume(v);
+    if (audioRef.current) audioRef.current.volume = v;
+  };
+
+  const handlePlaySampleAudio = (startTime) => {
+    if (audioRef.current) {
+      audioRef.current.currentTime = startTime;
+      audioRef.current.play().then(() => setIsPlaying(true)).catch(console.warn);
     }
   };
 
@@ -1312,8 +1358,30 @@ export default function Dashboard() {
     setActiveEvidenceField(null);
   };
 
-  // ── Review Queue Filter Logic ──
+  // ── Review Queue Confidence & Filter Logic ──
+  const getMeetingDisplayConfidence = (m) => {
+    if (m.confidence !== undefined && m.confidence !== null) {
+      const val = Number(m.confidence);
+      return val <= 1 ? Math.round(val * 100) : Math.round(val);
+    }
+    if (m.ai_snapshot?.confidence !== undefined && m.ai_snapshot?.confidence !== null) {
+      const val = Number(m.ai_snapshot.confidence);
+      return val <= 1 ? Math.round(val * 100) : Math.round(val);
+    }
+    const items = Array.isArray(m.action_items) ? m.action_items.filter(a => typeof a.confidence === 'number') : [];
+    if (items.length > 0) {
+      const avg = items.reduce((sum, item) => sum + item.confidence, 0) / items.length;
+      return avg <= 1 ? Math.round(avg * 100) : Math.round(avg);
+    }
+    if (m.call_type_confidence != null) {
+      const val = Number(m.call_type_confidence);
+      return val <= 1 ? Math.round(val * 100) : Math.round(val);
+    }
+    return null;
+  };
+
   const filteredReviewQueue = meetings.filter(m => {
+    // 1. Status Tab filter
     if (meetingsFilter === 'needs_review') {
       if (m.workflow_state === 'synced' || m.status === 'failed') return false;
       if (!['review', 'transcript_review', 'speaker_review', 'company_review'].includes(m.workflow_state)) return false;
@@ -1330,18 +1398,122 @@ export default function Dashboard() {
       if (m.status !== 'failed' && m.workflow_state !== 'failed') return false;
     }
 
+    // 2. Existing quick company and playbook filters
     if (selectedCompanyFilter !== 'all' && m.company_id !== selectedCompanyFilter) return false;
     if (selectedPlaybookFilter !== 'all' && (m.template_used || 'MEDDIC').toLowerCase() !== selectedPlaybookFilter.toLowerCase()) return false;
 
+    // 3. Quick-search field (matches title, company, or audio url)
     if (queueSearchQuery.trim()) {
       const q = queueSearchQuery.toLowerCase();
       const matchTitle = (m.title || '').toLowerCase().includes(q);
       const matchComp = (m.company_name || '').toLowerCase().includes(q);
-      if (!matchTitle && !matchComp) return false;
+      const matchAudio = (m.audio_url || '').toLowerCase().includes(q);
+      if (!matchTitle && !matchComp && !matchAudio) return false;
+    }
+
+    // 4. Advanced Filters (AND between categories, OR within multi-select sets)
+    // A. Title / Audio Filename
+    if (appliedAdvancedFilters.titleSearch && appliedAdvancedFilters.titleSearch.trim()) {
+      const q = appliedAdvancedFilters.titleSearch.trim().toLowerCase();
+      const matchTitle = (m.title || '').toLowerCase().includes(q);
+      const matchAudio = (m.audio_url || '').toLowerCase().includes(q);
+      if (!matchTitle && !matchAudio) return false;
+    }
+
+    // B. Company / Account
+    if (appliedAdvancedFilters.companies && appliedAdvancedFilters.companies.length > 0) {
+      const compName = m.company_name || 'Unassigned Account';
+      const hasMatch = appliedAdvancedFilters.companies.some(c => 
+        c.toLowerCase() === compName.toLowerCase() ||
+        (c === 'Unassigned Account' && (!m.company_id || !m.company_name || m.company_name === 'Unassigned Account'))
+      );
+      if (!hasMatch) return false;
+    }
+
+    // C. Playbooks
+    if (appliedAdvancedFilters.playbooks && appliedAdvancedFilters.playbooks.length > 0) {
+      const currentPb = (m.template_used || 'MEDDIC').toLowerCase();
+      const hasMatch = appliedAdvancedFilters.playbooks.some(pb => pb.toLowerCase() === currentPb);
+      if (!hasMatch) return false;
+    }
+
+    // D. Stages
+    if (appliedAdvancedFilters.stages && appliedAdvancedFilters.stages.length > 0) {
+      const currentStage = (m.workflow_state || 'review').toLowerCase();
+      const hasMatch = appliedAdvancedFilters.stages.some(st => st.toLowerCase() === currentStage);
+      if (!hasMatch) return false;
+    }
+
+    // E. Confidence Range
+    const confVal = getMeetingDisplayConfidence(m);
+    if (confVal === null) {
+      if (!appliedAdvancedFilters.includeUnratedConfidence) {
+        if (appliedAdvancedFilters.confidenceMin !== '' || appliedAdvancedFilters.confidenceMax !== '') {
+          return false;
+        }
+      }
+    } else {
+      if (appliedAdvancedFilters.confidenceMin !== '') {
+        const min = Number(appliedAdvancedFilters.confidenceMin);
+        if (confVal < min) return false;
+      }
+      if (appliedAdvancedFilters.confidenceMax !== '') {
+        const max = Number(appliedAdvancedFilters.confidenceMax);
+        if (confVal > max) return false;
+      }
+    }
+
+    // F. Last Activity Date Range
+    if (appliedAdvancedFilters.startDate) {
+      const start = new Date(appliedAdvancedFilters.startDate);
+      start.setHours(0, 0, 0, 0);
+      const meetingDate = new Date(m.created_at || m.updated_at);
+      if (meetingDate < start) return false;
+    }
+    if (appliedAdvancedFilters.endDate) {
+      const end = new Date(appliedAdvancedFilters.endDate);
+      end.setHours(23, 59, 59, 999);
+      const meetingDate = new Date(m.created_at || m.updated_at);
+      if (meetingDate > end) return false;
+    }
+
+    // G. Call Types
+    if (appliedAdvancedFilters.callTypes && appliedAdvancedFilters.callTypes.length > 0) {
+      const currentType = (m.call_type || 'discovery').toLowerCase();
+      const hasMatch = appliedAdvancedFilters.callTypes.some(ct => ct.toLowerCase() === currentType);
+      if (!hasMatch) return false;
     }
 
     return true;
   });
+
+  const availableCompanies = Array.from(new Set(meetings.map(m => m.company_name).filter(Boolean)));
+  const availablePlaybooks = Array.from(new Set([
+    'MEDDIC',
+    'BANT',
+    'SPICED',
+    'CHAMP',
+    'SPIN',
+    'CS QBR',
+    ...meetings.map(m => m.template_used).filter(Boolean)
+  ]));
+
+  const activeAdvancedFilterCount = 
+    (appliedAdvancedFilters.titleSearch ? 1 : 0) +
+    appliedAdvancedFilters.companies.length +
+    appliedAdvancedFilters.playbooks.length +
+    appliedAdvancedFilters.stages.length +
+    (appliedAdvancedFilters.confidenceMin !== '' || appliedAdvancedFilters.confidenceMax !== '' ? 1 : 0) +
+    (appliedAdvancedFilters.startDate || appliedAdvancedFilters.endDate ? 1 : 0) +
+    appliedAdvancedFilters.callTypes.length;
+
+  const handleResetAllFilters = () => {
+    setMeetingsFilter('all');
+    setSelectedCompanyFilter('all');
+    setSelectedPlaybookFilter('all');
+    setQueueSearchQuery('');
+    setAppliedAdvancedFilters(DEFAULT_ADVANCED_FILTERS);
+  };
 
   const qNeedsReview = meetings.filter(m => ['review', 'transcript_review', 'speaker_review'].includes(m.workflow_state)).length;
   const qLowConf = meetings.filter(m => m.workflow_state !== 'synced' && (m.action_items || []).some(a => a.confidence < 85)).length;
@@ -1362,6 +1534,13 @@ export default function Dashboard() {
     })),
     ...POPULAR_TEMPLATES.filter((preset) => !extractionProfiles.some((profile) => profile.id === preset.id))
   ];
+
+  const displaySpeakers = (speakers && speakers.length > 0)
+    ? speakers
+    : deriveSpeakersFromMeeting(meetingDetails);
+
+  const meetingSegments = meetingDetails?.segments || [];
+  const totalMeetingSecs = meetingSegments.reduce((acc, s) => acc + Math.max(0, (s.end_time || 0) - (s.start_time || 0)), 0) || 1;
 
   return (
     <div className="flex h-screen bg-[#F8FAFC] text-[#0F172A] font-sans overflow-hidden select-none">
@@ -1472,6 +1651,33 @@ export default function Dashboard() {
                   setSelectedMeetingId(id);
                   setViewMode("board");
                 }}
+                onSelectMeetingDetails={(mId, companyId) => {
+                  setSelectedMeetingId(mId);
+                  if (companyId) setSelectedCompanyId(companyId);
+                  setViewMode("call_details");
+                }}
+              />
+            </div>
+          ) : viewMode === "call_details" ? (
+            <div className="flex-1 overflow-y-auto">
+              <CallDetails
+                meetingId={selectedMeetingId}
+                companyId={selectedCompanyId}
+                API_URL={API_URL}
+                onBackToCustomer={(compId) => {
+                  if (compId) setSelectedCompanyId(compId);
+                  setViewMode("customers");
+                }}
+                onReviewMeeting={(id) => {
+                  setSelectedMeetingId(id);
+                  setAnalysisStep(6);
+                  setViewMode("board");
+                }}
+                onSyncMeeting={(m) => {
+                  setSelectedMeetingId(typeof m === "string" ? m : m?.id || selectedMeetingId);
+                  setAnalysisStep(7);
+                  setViewMode("board");
+                }}
               />
             </div>
           ) : viewMode === "analytics" ? (
@@ -1542,12 +1748,12 @@ export default function Dashboard() {
                   </div>
 
                   {/* Secondary Filter Bar */}
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-white p-3 rounded-xl border border-[#E5E7EB] shadow-3xs">
-                    <div className="relative">
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 bg-white p-3 rounded-xl border border-[#E5E7EB] shadow-3xs">
+                    <div className="relative sm:col-span-2">
                       <Search className="absolute left-2.5 top-2.5 text-[#94A3B8]" size={13} />
                       <input
                         type="text"
-                        placeholder="Search call title or account..."
+                        placeholder="Search call title, audio file, or account..."
                         value={queueSearchQuery}
                         onChange={(e) => setQueueSearchQuery(e.target.value)}
                         className="w-full bg-[#F8FAFC] border border-[#E5E7EB] rounded-lg pl-8 pr-3 py-1.5 text-xs text-[#0F172A] outline-none placeholder-[#94A3B8] focus:border-[#14B8A6]"
@@ -1566,19 +1772,148 @@ export default function Dashboard() {
                       <option value="qbr">CS QBR</option>
                     </select>
 
-                    <button
-                      onClick={() => { setMeetingsFilter('all'); setSelectedCompanyFilter('all'); setSelectedPlaybookFilter('all'); setQueueSearchQuery(''); }}
-                      className="px-3 py-1.5 bg-white border border-[#E5E7EB] hover:bg-[#F8FAFC] text-[#64748B] text-xs font-bold rounded-lg transition"
-                    >
-                      Reset Filters
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowAdvancedFilters(prev => !prev)}
+                        className={`flex-1 px-3 py-1.5 border rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 ${
+                          showAdvancedFilters || activeAdvancedFilterCount > 0
+                            ? 'bg-[#0F172A] text-white border-[#0F172A]'
+                            : 'bg-white border-[#E5E7EB] text-[#475569] hover:bg-[#F8FAFC]'
+                        }`}
+                      >
+                        <SlidersHorizontal size={12} className={showAdvancedFilters || activeAdvancedFilterCount > 0 ? 'text-[#14B8A6]' : 'text-[#64748B]'} />
+                        <span>Advanced Filters</span>
+                        {activeAdvancedFilterCount > 0 && (
+                          <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-[#14B8A6] text-white">
+                            {activeAdvancedFilterCount}
+                          </span>
+                        )}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleResetAllFilters}
+                        className="px-3 py-1.5 bg-white border border-[#E5E7EB] hover:bg-[#F8FAFC] text-[#64748B] text-xs font-bold rounded-lg transition"
+                        title="Reset all filters"
+                      >
+                        Reset Filters
+                      </button>
+                    </div>
                   </div>
+
+                  {/* Expandable Advanced Filters Panel */}
+                  <AdvancedFiltersPanel
+                    isOpen={showAdvancedFilters}
+                    onClose={() => setShowAdvancedFilters(false)}
+                    filters={appliedAdvancedFilters}
+                    onApplyFilters={(newFilters) => {
+                      setAppliedAdvancedFilters(newFilters);
+                    }}
+                    onClearFilters={() => {
+                      setAppliedAdvancedFilters(DEFAULT_ADVANCED_FILTERS);
+                    }}
+                    availableCompanies={availableCompanies}
+                    availablePlaybooks={availablePlaybooks}
+                    totalMatches={filteredReviewQueue.length}
+                  />
+
+                  {/* Applied Filter Chips */}
+                  {(activeAdvancedFilterCount > 0 || queueSearchQuery || selectedPlaybookFilter !== 'all') && (
+                    <div className="flex flex-wrap items-center gap-2 bg-[#F8FAFC] p-2.5 rounded-lg border border-[#E5E7EB] text-xs">
+                      <span className="text-[10px] font-bold text-[#64748B] uppercase tracking-wider">Applied Filters:</span>
+
+                      {queueSearchQuery && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white border border-[#E2E8F0] text-[11px] font-semibold text-[#0F172A]">
+                          Quick Search: "{queueSearchQuery}"
+                          <button onClick={() => setQueueSearchQuery('')} className="hover:text-rose-600"><X size={11} /></button>
+                        </span>
+                      )}
+
+                      {selectedPlaybookFilter !== 'all' && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white border border-[#E2E8F0] text-[11px] font-semibold text-[#0F172A]">
+                          Playbook: {selectedPlaybookFilter.toUpperCase()}
+                          <button onClick={() => setSelectedPlaybookFilter('all')} className="hover:text-rose-600"><X size={11} /></button>
+                        </span>
+                      )}
+
+                      {appliedAdvancedFilters.titleSearch && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white border border-[#E2E8F0] text-[11px] font-semibold text-[#0F172A]">
+                          Title/File: "{appliedAdvancedFilters.titleSearch}"
+                          <button onClick={() => setAppliedAdvancedFilters(prev => ({ ...prev, titleSearch: '' }))} className="hover:text-rose-600"><X size={11} /></button>
+                        </span>
+                      )}
+
+                      {appliedAdvancedFilters.companies.map(c => (
+                        <span key={c} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white border border-[#E2E8F0] text-[11px] font-semibold text-[#0F172A]">
+                          Account: {c}
+                          <button onClick={() => setAppliedAdvancedFilters(prev => ({ ...prev, companies: prev.companies.filter(x => x !== c) }))} className="hover:text-rose-600"><X size={11} /></button>
+                        </span>
+                      ))}
+
+                      {appliedAdvancedFilters.playbooks.map(pb => (
+                        <span key={pb} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white border border-[#E2E8F0] text-[11px] font-semibold text-[#0F172A]">
+                          Playbook: {pb}
+                          <button onClick={() => setAppliedAdvancedFilters(prev => ({ ...prev, playbooks: prev.playbooks.filter(x => x !== pb) }))} className="hover:text-rose-600"><X size={11} /></button>
+                        </span>
+                      ))}
+
+                      {appliedAdvancedFilters.stages.map(st => (
+                        <span key={st} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white border border-[#E2E8F0] text-[11px] font-semibold text-[#0F172A]">
+                          Stage: {st.replace(/_/g, ' ')}
+                          <button onClick={() => setAppliedAdvancedFilters(prev => ({ ...prev, stages: prev.stages.filter(x => x !== st) }))} className="hover:text-rose-600"><X size={11} /></button>
+                        </span>
+                      ))}
+
+                      {(appliedAdvancedFilters.confidenceMin !== '' || appliedAdvancedFilters.confidenceMax !== '') && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white border border-[#E2E8F0] text-[11px] font-semibold text-[#0F172A]">
+                          Confidence: {appliedAdvancedFilters.confidenceMin || 0}% - {appliedAdvancedFilters.confidenceMax || 100}%
+                          <button onClick={() => setAppliedAdvancedFilters(prev => ({ ...prev, confidenceMin: '', confidenceMax: '' }))} className="hover:text-rose-600"><X size={11} /></button>
+                        </span>
+                      )}
+
+                      {(appliedAdvancedFilters.startDate || appliedAdvancedFilters.endDate) && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white border border-[#E2E8F0] text-[11px] font-semibold text-[#0F172A]">
+                          Dates: {appliedAdvancedFilters.startDate || 'Any'} to {appliedAdvancedFilters.endDate || 'Now'}
+                          <button onClick={() => setAppliedAdvancedFilters(prev => ({ ...prev, startDate: '', endDate: '' }))} className="hover:text-rose-600"><X size={11} /></button>
+                        </span>
+                      )}
+
+                      {appliedAdvancedFilters.callTypes.map(ct => (
+                        <span key={ct} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white border border-[#E2E8F0] text-[11px] font-semibold text-[#0F172A]">
+                          Type: {formatCallType(ct)}
+                          <button onClick={() => setAppliedAdvancedFilters(prev => ({ ...prev, callTypes: prev.callTypes.filter(x => x !== ct) }))} className="hover:text-rose-600"><X size={11} /></button>
+                        </span>
+                      ))}
+
+                      <span className="text-[11px] text-[#64748B] font-medium ml-auto">
+                        Showing <strong>{filteredReviewQueue.length}</strong> of {meetings.length} calls
+                      </span>
+
+                      <button
+                        type="button"
+                        onClick={handleResetAllFilters}
+                        className="text-[11px] font-bold text-[#14B8A6] hover:underline ml-2"
+                      >
+                        Clear All
+                      </button>
+                    </div>
+                  )}
 
                   {/* Canonical Review Queue Table */}
                   <div className="bg-white border border-[#E5E7EB] rounded-xl overflow-hidden shadow-3xs text-left">
                     {filteredReviewQueue.length === 0 ? (
-                      <div className="py-16 text-center text-xs text-[#94A3B8] italic">
-                        No calls matching selected filters.
+                      <div className="py-16 text-center text-xs text-[#94A3B8] italic space-y-2">
+                        <p>No calls matching selected filters.</p>
+                        {(activeAdvancedFilterCount > 0 || queueSearchQuery || selectedPlaybookFilter !== 'all' || meetingsFilter !== 'all') && (
+                          <button
+                            type="button"
+                            onClick={handleResetAllFilters}
+                            className="px-3 py-1 bg-white border border-[#E5E7EB] hover:bg-[#F8FAFC] text-[#14B8A6] text-xs font-bold rounded-lg transition"
+                          >
+                            Reset Filters
+                          </button>
+                        )}
                       </div>
                     ) : (
                       <div className="overflow-x-auto">
@@ -1598,6 +1933,7 @@ export default function Dashboard() {
                             {filteredReviewQueue.map((m) => {
                               const isSync = m.workflow_state === 'synced';
                               const isFail = m.status === 'failed' || m.workflow_state === 'failed';
+                              const dispConf = getMeetingDisplayConfidence(m);
                               return (
                                 <tr key={m.id} className="hover:bg-[#FAFBFB] transition-colors border-b border-[#F1F5F9] last:border-0">
                                   <td className="py-3 px-4">
@@ -1625,7 +1961,7 @@ export default function Dashboard() {
                                     </span>
                                   </td>
                                   <td className="py-3 px-4 text-center font-mono text-[11px] text-[#0F766E]">
-                                    94%
+                                    {dispConf !== null ? `${dispConf}%` : '94%'}
                                   </td>
                                   <td className="py-3 px-4 text-[#64748B] text-[10.5px] font-medium">
                                     {new Date(m.created_at || m.updated_at).toLocaleDateString()}
@@ -1686,18 +2022,18 @@ export default function Dashboard() {
                       </div>
                     </div>
 
-                    {/* 7 Stepper Items */}
+                    {/* Stepper Items (6 main stages, Speaker Identification is internal slide screen of Transcript) */}
                     <div className="flex items-center gap-2">
                       {[
-                        { step: 1, label: "Transcript" },
-                        { step: 3, label: "Company" },
-                        { step: 4, label: "Playbook" },
-                        { step: 5, label: "Generate" },
-                        { step: 6, label: "Review" },
-                        { step: 7, label: "Sync" }
-                      ].map(({ step, label }) => {
-                        const isCurrent = analysisStep === step;
-                        const isPast = analysisStep > step;
+                        { step: 1, displayStep: 1, label: "Transcript" },
+                        { step: 3, displayStep: 2, label: "Company" },
+                        { step: 4, displayStep: 3, label: "Playbook" },
+                        { step: 5, displayStep: 4, label: "Generate" },
+                        { step: 6, displayStep: 5, label: "Review" },
+                        { step: 7, displayStep: 6, label: "Sync" }
+                      ].map(({ step, displayStep, label }) => {
+                        const isCurrent = analysisStep === step || (step === 1 && analysisStep === 2);
+                        const isPast = analysisStep > step && !(step === 1 && analysisStep === 2);
                         return (
                           <button
                             key={step}
@@ -1710,7 +2046,7 @@ export default function Dashboard() {
                                 : 'text-[#94A3B8] hover:text-[#0F172A]'
                             }`}
                           >
-                            <span className="font-mono text-[9px]">{step}.</span>
+                            <span className="font-mono text-[9px]">{displayStep}.</span>
                             <span>{label}</span>
                             {isPast && <Check size={10} />}
                           </button>
@@ -1766,12 +2102,12 @@ export default function Dashboard() {
                   </div>
 
                   {/* Main Workspace Body */}
-                  <div className="flex-1 overflow-hidden flex">
+                  <div className="flex-1 min-h-0 overflow-hidden relative flex flex-col">
                     
-                    {/* STEP 1: Transcript Verification */}
-                    {analysisStep === 1 && (
+                    {/* STEP 1 & 2: Transcript Verification with smooth internal slide transition to Speaker Identification */}
+                    {(analysisStep === 1 || analysisStep === 2) && (
                       (!meetingDetails?.segments || meetingDetails.segments.length === 0) ? (
-                        <div className="flex-1 flex flex-col items-center justify-center p-12 bg-white space-y-4">
+                        <div className="w-full h-full flex flex-col items-center justify-center p-12 bg-white space-y-4">
                           <Loader2 size={32} className="animate-spin text-[#14B8A6]" />
                           <h3 className="text-base font-extrabold text-[#0F172A]">Preparing transcript...</h3>
                           <p className="text-xs text-[#64748B] max-w-sm text-center leading-relaxed">
@@ -1779,7 +2115,15 @@ export default function Dashboard() {
                           </p>
                         </div>
                       ) : (
-                      <div className="flex-1 flex overflow-hidden">
+                        <>
+                          {/* SLIDE 1: Transcript Verification */}
+                          <div 
+                            className={`absolute inset-0 w-full h-full flex transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+                              analysisStep === 1 
+                                ? 'translate-x-0 opacity-100 pointer-events-auto' 
+                                : '-translate-x-full opacity-0 pointer-events-none'
+                            }`}
+                          >
                         <div className="flex-1 flex flex-col border-r border-[#E5E7EB] bg-white overflow-hidden">
                           <div className="flex-1 overflow-y-auto p-5">
                             {(() => {
@@ -1814,14 +2158,8 @@ export default function Dashboard() {
                               isPlaying={isPlaying}
                               onTogglePlay={handleTogglePlay}
                               playbackSpeed={playbackSpeed}
-                              onChangeSpeed={(spd) => {
-                                setPlaybackSpeed(spd);
-                                if (audioRef.current) audioRef.current.playbackRate = spd;
-                              }}
-                              onVolumeChange={(v) => {
-                                setAudioVolume(v);
-                                if (audioRef.current) audioRef.current.volume = v;
-                              }}
+                              onChangeSpeed={handleChangeSpeed}
+                              onVolumeChange={handleVolumeChange}
                               onSaveSegment={async (segId, newText) => {
                                 try {
                                   await fetch(`${API_URL}/api/meetings/${selectedMeetingId}/transcript`, {
@@ -1907,39 +2245,49 @@ export default function Dashboard() {
                                 const initial = deriveSpeakersFromMeeting(meetingDetails);
                                 setSpeakers(initial);
                               }
-                              setAnalysisStep(3);
+                              setAnalysisStep(2);
                             }}
-                            className="w-full py-2.5 bg-[#14B8A6] hover:bg-[#0D9488] text-white text-xs font-bold rounded-lg shadow-3xs flex items-center justify-center gap-1.5 transition"
+                            className="w-full py-2.5 px-4 bg-[#14B8A6] hover:bg-[#0D9488] active:scale-[0.99] text-white text-xs font-bold rounded-lg shadow-3xs flex items-center justify-center gap-2 transition-all duration-150 group"
                           >
-                            <span>Confirm Transcript & Proceed to Company →</span>
+                            <span>Confirm & Map Speakers</span>
+                            <ArrowRight size={14} className="transition-transform duration-200 group-hover:translate-x-0.5" />
                           </button>
                         </div>
                       </div>
-                      )
-                    )}
 
-                    {/* Automatic speaker identification is handled inline on the transcript; manual correction is optional. */}
-                    {false && analysisStep === 2 && (() => {
-                      const displaySpeakers = (speakers && speakers.length > 0)
-                        ? speakers
-                        : deriveSpeakersFromMeeting(meetingDetails);
-
-                      const segments = meetingDetails?.segments || [];
-                      const totalMeetingSecs = segments.reduce((acc, s) => acc + Math.max(0, (s.end_time || 0) - (s.start_time || 0)), 0) || 1;
-
-                      return (
-                        <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-[#F8FAFC]">
-                          <div className="bg-white border border-[#E5E7EB] rounded-xl p-5 shadow-3xs space-y-5">
-                            <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-3">
-                              <div>
-                                <span className="text-[10px] font-bold text-[#14B8A6] uppercase tracking-wider block font-mono">Step 2 of 7</span>
-                                <h3 className="text-sm font-extrabold text-[#0F172A] mt-0.5">Speaker Identities & Stakeholder Roles</h3>
-                                <p className="text-xs text-[#64748B] font-medium mt-0.5">Map acoustic speakers to corporate identities and roles before AI extraction.</p>
+                      {/* SLIDE 2: Internal Slide Screen - Speaker Identification */}
+                      <div 
+                        className={`absolute inset-0 w-full h-full overflow-y-auto p-6 space-y-6 bg-[#F8FAFC] transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+                          analysisStep === 2 
+                            ? 'translate-x-0 opacity-100 pointer-events-auto' 
+                            : 'translate-x-full opacity-0 pointer-events-none'
+                        }`}
+                      >
+                        <div className="bg-white border border-[#E5E7EB] rounded-xl p-5 shadow-3xs space-y-5">
+                          <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-3">
+                            <div>
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className="text-[10px] font-bold text-[#14B8A6] uppercase tracking-wider font-mono">Internal Stage</span>
+                                <span className="text-[#CBD5E1]">•</span>
+                                <span className="text-[10px] font-semibold text-[#64748B]">Speaker Tagging</span>
                               </div>
+                              <h3 className="text-sm font-extrabold text-[#0F172A] mt-0.5">Speaker Identities & Stakeholder Roles</h3>
+                              <p className="text-xs text-[#64748B] font-medium mt-0.5">Map acoustic speakers to corporate identities and roles before AI extraction.</p>
+                            </div>
+                            <div className="flex items-center gap-2.5">
+                              <button
+                                onClick={() => setAnalysisStep(1)}
+                                className="flex items-center gap-1.5 px-3 py-1.5 bg-[#F8FAFC] hover:bg-[#F1F5F9] border border-[#E2E8F0] text-[#64748B] hover:text-[#0F172A] text-xs font-bold rounded-lg transition"
+                                title="Return to Transcript"
+                              >
+                                <ArrowLeft size={13} />
+                                <span>Back to Transcript</span>
+                              </button>
                               <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg text-xs font-bold">
                                 {displaySpeakers.length} Speakers Mapped
                               </span>
                             </div>
+                          </div>
 
                             {/* Call Type Detection & Manual Override Panel */}
                             <div className="bg-slate-50 border border-[#E2E8F0] rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -1978,7 +2326,7 @@ export default function Dashboard() {
                             {/* Speaker Cards Grid */}
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                               {displaySpeakers.map((spk, idx) => {
-                                const spkSegments = segments.filter(s => 
+                                const spkSegments = meetingSegments.filter(s => 
                                   (s.speaker_id && s.speaker_id === spk.speaker_id) || 
                                   (s.speaker_name && s.speaker_name === spk.name) || 
                                   (s.speaker && s.speaker === spk.name) ||
@@ -2026,12 +2374,7 @@ export default function Dashboard() {
                                         {sampleSegment && (
                                           <button
                                             type="button"
-                                            onClick={() => {
-                                              if (audioRef.current) {
-                                                audioRef.current.currentTime = sampleSegment.start_time;
-                                                audioRef.current.play().then(() => setIsPlaying(true)).catch(console.warn);
-                                              }
-                                            }}
+                                            onClick={() => handlePlaySampleAudio(sampleSegment.start_time)}
                                             className="text-[9.5px] text-[#14B8A6] hover:text-[#0D9488] font-bold flex items-center gap-1"
                                             title="Listen to sample utterance"
                                           >
@@ -2117,9 +2460,10 @@ export default function Dashboard() {
                             <div className="flex items-center justify-between pt-4 border-t border-[#F1F5F9]">
                               <button
                                 onClick={() => setAnalysisStep(1)}
-                                className="px-4 py-2 bg-white border border-[#E5E7EB] hover:bg-[#F8FAFC] text-[#64748B] text-xs font-bold rounded-lg transition"
+                                className="flex items-center gap-1.5 px-4 py-2 bg-white border border-[#E5E7EB] hover:bg-[#F8FAFC] text-[#64748B] hover:text-[#0F172A] text-xs font-bold rounded-lg transition shadow-3xs"
                               >
-                                ← Back to Transcript
+                                <ArrowLeft size={13} />
+                                <span>Back to Transcript</span>
                               </button>
                               <button
                                 onClick={async () => {
@@ -2128,21 +2472,22 @@ export default function Dashboard() {
                                 }}
                                 className="px-5 py-2.5 bg-[#14B8A6] hover:bg-[#0D9488] text-white text-xs font-bold rounded-lg shadow-3xs transition flex items-center gap-1.5"
                               >
-                                <span>Confirm Speakers & Proceed to Step 3 (Company) →</span>
+                                <span>Confirm Speakers & Proceed to Step 2 (Company) →</span>
                               </button>
                             </div>
                           </div>
                         </div>
-                      );
-                    })()}
+                        </>
+                      )
+                    )}
 
-                    {/* STEP 3: Company Association */}
-                    {analysisStep === 3 && (
-                      <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-[#F8FAFC]">
-                        <div className="bg-white border border-[#E5E7EB] rounded-xl p-5 shadow-3xs space-y-4 max-w-3xl mx-auto">
-                          <div className="border-b border-[#F1F5F9] pb-3 flex items-center justify-between">
-                            <div>
-                              <span className="text-[10px] font-bold text-[#14B8A6] uppercase tracking-wider block font-mono">Step 3 of 7</span>
+                  {/* STEP 2: Company Association */}
+                  {analysisStep === 3 && (
+                    <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-6 bg-[#F8FAFC]">
+                      <div className="bg-white border border-[#E5E7EB] rounded-xl p-5 shadow-3xs space-y-4 max-w-3xl mx-auto">
+                        <div className="border-b border-[#F1F5F9] pb-3 flex items-center justify-between">
+                          <div>
+                            <span className="text-[10px] font-bold text-[#14B8A6] uppercase tracking-wider block font-mono">Step 2 of 6</span>
                               <h3 className="text-sm font-extrabold text-[#0F172A] mt-0.5">Link Account & Company Metadata</h3>
                               <p className="text-xs text-[#64748B] font-medium mt-0.5">Tag this meeting session to an existing customer or create a new corporate account.</p>
                             </div>
@@ -2274,29 +2619,29 @@ export default function Dashboard() {
                           <div className="flex items-center justify-between pt-4 border-t border-[#F1F5F9]">
                             <button
                               type="button"
-                              onClick={() => setAnalysisStep(1)}
+                              onClick={() => setAnalysisStep(2)}
                               className="px-4 py-2 bg-white border border-[#E5E7EB] hover:bg-[#F8FAFC] text-[#64748B] text-xs font-bold rounded-lg transition"
                             >
-                              ← Back to Transcript
+                              ← Back to Speaker Mapping
                             </button>
                             <button
                               type="button"
                               onClick={handleConfirmCompanyStep}
                               className="px-5 py-2.5 bg-[#14B8A6] hover:bg-[#0D9488] text-white text-xs font-bold rounded-lg shadow-3xs transition"
                             >
-                              Confirm Company & Proceed to Step 4 (Template) →
+                              Confirm Company & Proceed to Step 3 (Playbook) →
                             </button>
                           </div>
                         </div>
                       </div>
                     )}
 
-                    {/* STEP 4: Playbook Framework Selection */}
+                    {/* STEP 3: Playbook Framework Selection */}
                     {analysisStep === 4 && (
-                      <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-[#F8FAFC]">
+                      <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-6 bg-[#F8FAFC]">
                         <div className="bg-white border border-[#E5E7EB] rounded-xl p-5 shadow-3xs space-y-4">
                           <div className="border-b border-[#F1F5F9] pb-3">
-                            <span className="text-[10px] font-bold text-[#14B8A6] uppercase tracking-wider block font-mono">Step 4 of 7</span>
+                            <span className="text-[10px] font-bold text-[#14B8A6] uppercase tracking-wider block font-mono">Step 3 of 6</span>
                             <h3 className="text-sm font-extrabold text-[#0F172A] mt-0.5">Select Playbook Framework for AI Extraction</h3>
                             <p className="text-xs text-[#64748B] font-medium mt-0.5">Choose the sales methodology PulseSync should extract and verify from this call.</p>
                           </div>
@@ -2360,7 +2705,7 @@ export default function Dashboard() {
                               className="px-6 py-2.5 bg-[#14B8A6] hover:bg-[#0D9488] text-white text-xs font-bold rounded-lg shadow-3xs flex items-center gap-1.5 transition"
                             >
                               <Sparkles size={13} />
-                              <span>Compile AI Intelligence (Step 5) →</span>
+                              <span>Compile AI Intelligence (Step 4) →</span>
                             </button>
                           </div>
                         </div>
@@ -2369,7 +2714,7 @@ export default function Dashboard() {
 
                     {/* STEP 5: Generating */}
                     {analysisStep === 5 && (
-                      <div className="flex-1 flex flex-col items-center justify-center p-12 bg-white space-y-4">
+                      <div className="flex-1 min-h-0 flex flex-col items-center justify-center p-12 bg-white space-y-4">
                         <Loader2 size={32} className="animate-spin text-[#14B8A6]" />
                         <h3 className="text-base font-extrabold text-[#0F172A]">Compiling Grounded Intelligence...</h3>
                         <p className="text-xs text-[#64748B] max-w-sm text-center leading-relaxed">
@@ -2380,7 +2725,7 @@ export default function Dashboard() {
 
                     {/* STEP 6: Dynamic AI Review Workspace */}
                     {analysisStep === 6 && (
-                      <div className="flex-1 overflow-y-auto p-6 bg-[#F8FAFC]">
+                      <div className="flex-1 min-h-0 flex flex-col overflow-hidden bg-[#F8FAFC]">
                         <DynamicReviewWorkspace
                           apiUrl={API_URL}
                           meetingId={selectedMeetingId}
@@ -2404,7 +2749,7 @@ export default function Dashboard() {
 
                     {/* STEP 7: CRM Destination Sync */}
                     {analysisStep === 7 && (
-                      <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-[#F8FAFC]">
+                      <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-6 bg-[#F8FAFC]">
                         
                         {/* Destination Tabs */}
                         <div className="bg-white border border-[#E5E7EB] rounded-xl p-5 shadow-3xs space-y-5">
@@ -2423,6 +2768,7 @@ export default function Dashboard() {
                             <div className="flex items-center gap-2">
                               {['hubspot', 'salesforce', 'pipedrive'].map(dest => {
                                 const isDestConnected = integrationsList.some(i => i.provider === dest && i.connection_status === 'connected');
+                                const isComingSoon = dest !== 'hubspot';
                                 return (
                                   <button
                                     key={dest}
@@ -2434,7 +2780,9 @@ export default function Dashboard() {
                                     }`}
                                   >
                                     <span>{dest}</span>
-                                    {isDestConnected ? (
+                                    {isComingSoon ? (
+                                      <span className="text-[9px] text-amber-600 font-semibold bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200 lowercase">soon</span>
+                                    ) : isDestConnected ? (
                                       <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
                                     ) : (
                                       <span className="text-[9px] text-[#94A3B8] font-normal lowercase">(not connected)</span>
@@ -2459,7 +2807,7 @@ export default function Dashboard() {
                                       <div className="flex items-center gap-2">
                                         <h4 className="text-sm font-extrabold text-[#0F172A]">Synced Successfully to HubSpot</h4>
                                         <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded text-[10px] font-mono font-bold">
-                                          PORTAL #247215704
+                                          {syncPreview?.destination?.accountName ? `PORTAL #${syncPreview.destination.accountName}` : 'SYNCED'}
                                         </span>
                                       </div>
                                       <p className="text-xs text-[#64748B] mt-0.5 font-medium">
@@ -2529,9 +2877,9 @@ export default function Dashboard() {
                                         ID: {syncSuccessData?.destinationRecordIds?.company_id || syncSuccessData?.updatedRecords?.company?.id || "Synced"}
                                       </span>
                                     </div>
-                                    {(syncSuccessData?.updatedRecords?.company?.url || syncSuccessData?.destinationRecordIds?.company_id) ? (
+                                    {(syncSuccessData?.updatedRecords?.company?.url) ? (
                                       <a
-                                        href={syncSuccessData?.updatedRecords?.company?.url || `https://app.hubspot.com/contacts/247215704/record/0-2/${syncSuccessData.destinationRecordIds.company_id}`}
+                                        href={syncSuccessData.updatedRecords.company.url}
                                         target="_blank"
                                         rel="noreferrer"
                                         className="px-2.5 py-1 bg-[#F8FAFC] border border-[#E2E8F0] hover:bg-[#F1F5F9] text-xs font-bold text-[#0F172A] rounded-lg transition inline-flex items-center gap-1"
@@ -2559,9 +2907,9 @@ export default function Dashboard() {
                                         ID: {syncSuccessData?.destinationRecordIds?.deal_id || syncSuccessData?.updatedRecords?.deal?.id || "Synced"}
                                       </span>
                                     </div>
-                                    {(syncSuccessData?.updatedRecords?.deal?.url || syncSuccessData?.destinationRecordIds?.deal_id) ? (
+                                    {(syncSuccessData?.updatedRecords?.deal?.url) ? (
                                       <a
-                                        href={syncSuccessData?.updatedRecords?.deal?.url || `https://app.hubspot.com/contacts/247215704/record/0-3/${syncSuccessData.destinationRecordIds.deal_id}`}
+                                        href={syncSuccessData.updatedRecords.deal.url}
                                         target="_blank"
                                         rel="noreferrer"
                                         className="px-2.5 py-1 bg-[#F8FAFC] border border-[#E2E8F0] hover:bg-[#F1F5F9] text-xs font-bold text-[#0F172A] rounded-lg transition inline-flex items-center gap-1"
@@ -2742,7 +3090,7 @@ export default function Dashboard() {
                               <div className="space-y-1">
                                 <h4 className="text-sm font-extrabold text-[#0F172A]">Synchronization in Progress</h4>
                                 <p className="text-xs text-[#64748B] max-w-md mx-auto leading-relaxed">
-                                  Writing verified intelligence to HubSpot portal #247215704, associating contacts, and logging activity. Please do not close or navigate away.
+                                  Writing verified intelligence to HubSpot{syncPreview?.destination?.accountName ? ` portal #${syncPreview.destination.accountName}` : ''}, associating contacts, and logging activity. Please do not close or navigate away.
                                 </p>
                               </div>
                             </div>
@@ -2766,7 +3114,24 @@ export default function Dashboard() {
                                 </div>
                               )}
 
-                              {!isHubSpotConnected && activeSyncTab === 'hubspot' ? (
+                              {activeSyncTab !== 'hubspot' ? (
+                                <div className="p-8 bg-[#FAFBFB] border border-[#E5E7EB] rounded-xl text-center space-y-3">
+                                  <div className="h-10 w-10 mx-auto rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-500 font-bold text-xs uppercase">
+                                    {activeSyncTab === 'salesforce' ? 'SF' : 'PD'}
+                                  </div>
+                                  <h4 className="text-xs font-extrabold text-[#0F172A] capitalize">{activeSyncTab} Integration — Coming Soon</h4>
+                                  <p className="text-xs text-[#64748B] max-w-md mx-auto leading-relaxed">
+                                    Direct synchronization for {activeSyncTab === 'salesforce' ? 'Salesforce' : 'Pipedrive'} is currently in development. HubSpot CRM is currently enabled for bidirectional intelligence sync.
+                                  </p>
+                                  <button
+                                    onClick={() => setActiveSyncTab('hubspot')}
+                                    className="px-4 py-2 bg-[#0F172A] hover:bg-slate-800 text-white text-xs font-bold rounded-lg shadow-3xs inline-flex items-center gap-1.5 transition"
+                                  >
+                                    <span>Switch to HubSpot CRM</span>
+                                    <ArrowRight size={13} />
+                                  </button>
+                                </div>
+                              ) : !isHubSpotConnected ? (
                                 <div className="p-8 bg-[#FAFBFB] border border-[#E5E7EB] rounded-xl text-center space-y-3">
                                   <Database size={28} className="mx-auto text-[#94A3B8]" />
                                   <h4 className="text-xs font-extrabold text-[#0F172A]">HubSpot CRM is Not Connected</h4>
@@ -2797,7 +3162,7 @@ export default function Dashboard() {
                                       </div>
                                       <div>
                                         <span className="text-xs font-bold text-[#0F172A] block">HubSpot CRM Integration</span>
-                                        <span className="text-[11px] text-[#64748B] block">Connected Portal #{syncPreview.destination?.accountName || '247215704'}</span>
+                                        <span className="text-[11px] text-[#64748B] block">Connected Portal {syncPreview.destination?.accountName ? `#${syncPreview.destination.accountName}` : 'Active'}</span>
                                       </div>
                                     </div>
                                     <span className="px-2.5 py-1 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-full text-[10px] font-mono font-bold flex items-center gap-1">

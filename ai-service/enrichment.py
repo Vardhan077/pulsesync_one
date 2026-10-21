@@ -81,6 +81,31 @@ def generate_meeting_enrichment(pipeline_result: dict, meeting_id: str, schema_f
     "conversation_intelligence": grounded.get("conversation_intelligence", {})
   }
 
+  # Populate grounded company memories detected from verified fields
+  memories_detected = []
+  mem_type_map = {
+    "budget": "budget",
+    "champion": "champion",
+    "economic_buyer": "decision_maker",
+    "decision_maker": "decision_maker",
+    "timeline": "timeline",
+    "competition": "competitor",
+    "competitors": "competitor"
+  }
+  for fld in (grounded.get("fields") or grounded.get("template_fields") or []):
+    fid = fld.get("field_id") or fld.get("id") or ""
+    fval = fld.get("value")
+    if fid in mem_type_map and fval and isinstance(fval, str) and fval.strip():
+      lower_val = fval.strip().lower()
+      if lower_val not in ("none", "n/a", "unknown", "not discussed", "not mentioned"):
+        memories_detected.append({
+          "memory_type": mem_type_map[fid],
+          "value": fval.strip(),
+          "confidence": int(float(fld.get("confidence", 0.9)) * 100) if fld.get("confidence") is not None else 95,
+          "evidence": fld.get("quote") or fld.get("evidence") or ""
+        })
+  summary["memories_detected"] = memories_detected
+
   flat_extracted_data = {}
   for tf in grounded.get("fields") or grounded.get("template_fields", []):
     flat_extracted_data[tf["field_id"]] = tf["value"]

@@ -170,15 +170,6 @@ async def process_audio(payload: ProcessRequest):
       )
 
   payload.audio_path = str(requested_path)
-  try:
-    requested_path.relative_to(uploads_root)
-  except ValueError:
-    logger.warning("Rejected audio path outside the configured uploads directory")
-    raise HTTPException(status_code=400, detail="Audio path is outside the permitted uploads directory")
-  if not requested_path.is_file():
-    logger.error("Requested audio file was not found in the permitted uploads directory")
-    raise HTTPException(status_code=404, detail="Audio file not found")
-  payload.audio_path = str(requested_path)
   
   try:
     # Lazy imports to support fast startup and graceful fallbacks

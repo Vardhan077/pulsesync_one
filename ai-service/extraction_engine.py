@@ -307,6 +307,48 @@ EXTRACTION_PROFILE_TEMPLATES = {
         "action_items_enabled": True,
         "risks_enabled": True,
         "objections_enabled": True
+    },
+    "champ": {
+        "id": "champ",
+        "name": "CHAMP",
+        "description": "Challenges, Authority, Money, Prioritization qualification methodology.",
+        "summary_sections": [
+            {"id": "executive_summary", "name": "Executive Summary", "description": "Concise overview of conversation outcomes.", "max_words": 120, "enabled": True},
+            {"id": "challenges_overview", "name": "Challenges & Pain", "description": "Core business challenges client faces.", "max_words": 100, "enabled": True},
+            {"id": "prioritization_timeline", "name": "Prioritization & Urgency", "description": "Where this stands among client priorities and target timeline.", "max_words": 100, "enabled": True},
+            {"id": "next_steps", "name": "Next Steps", "description": "Agreed milestones and next steps.", "max_words": 80, "enabled": True}
+        ],
+        "fields": [
+            {"id": "challenges", "name": "Challenges", "type": "text", "description": "Primary business or technical challenges needing resolution.", "evidence_required": True, "enabled": True},
+            {"id": "authority", "name": "Authority", "type": "person", "description": "Stakeholders with authority to approve solution.", "evidence_required": True, "enabled": True},
+            {"id": "money", "name": "Money", "type": "currency", "description": "Budget, investment parameters, or financial considerations.", "evidence_required": True, "enabled": True},
+            {"id": "prioritization", "name": "Prioritization", "type": "text", "description": "Urgency and priority rank of the initiative.", "evidence_required": True, "enabled": True}
+        ],
+        "action_items_enabled": True,
+        "risks_enabled": True,
+        "objections_enabled": True
+    },
+    "spin": {
+        "id": "spin",
+        "name": "SPIN",
+        "description": "Situation, Problem, Implication, Need-Payoff selling methodology.",
+        "summary_sections": [
+            {"id": "executive_summary", "name": "Executive Summary", "description": "Concise overview of conversation outcomes.", "max_words": 120, "enabled": True},
+            {"id": "situation_context", "name": "Situation Context", "description": "Client background, current tools, and operating facts.", "max_words": 100, "enabled": True},
+            {"id": "problem_analysis", "name": "Problem Analysis", "description": "Core difficulties and pain expressed by client.", "max_words": 100, "enabled": True},
+            {"id": "implications_impact", "name": "Implications & Cost", "description": "Consequences of inaction or delays.", "max_words": 100, "enabled": True},
+            {"id": "need_payoff", "name": "Need-Payoff", "description": "Explicit value customer anticipates from solution.", "max_words": 100, "enabled": True},
+            {"id": "next_steps", "name": "Next Steps", "description": "Agreed follow-ups and action items.", "max_words": 80, "enabled": True}
+        ],
+        "fields": [
+            {"id": "situation", "name": "Situation", "type": "text", "description": "Facts, background, and current operating state.", "evidence_required": True, "enabled": True},
+            {"id": "problem", "name": "Problem", "type": "text", "description": "Specific difficulties, friction, or dissatisfaction.", "evidence_required": True, "enabled": True},
+            {"id": "implication", "name": "Implication", "type": "text", "description": "Business impact, risks, or costs of the problems.", "evidence_required": True, "enabled": True},
+            {"id": "need_payoff", "name": "Need-Payoff", "type": "text", "description": "Value and benefits customer expects from solving the problem.", "evidence_required": True, "enabled": True}
+        ],
+        "action_items_enabled": True,
+        "risks_enabled": True,
+        "objections_enabled": True
     }
 }
 

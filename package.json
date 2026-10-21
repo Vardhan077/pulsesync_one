@@ -13,7 +13,7 @@
     "check": "node scripts/verify-ui.js && node --check backend/server.js && node --check backend/services/integration/crypto.js && node --check extension/background.js && node --check extension/offscreen.js && node --check extension/popup.js",
     "test": "npm run check && npm run test:js && npm run test:python",
     "test:bot": "node backend/tests/meeting_bot_test.js",
-    "test:js": "node backend/tests/security_primitives_test.js && node backend/tests/meeting_bot_test.js && node backend/tests/transcript_capture_test.js && node backend/tests/zoom_bot_test.js && node backend/tests/platform_attribution_test.js && node backend/tests/meeting_bot_api_test.js",
+    "test:js": "node backend/tests/security_primitives_test.js && node backend/tests/meeting_bot_test.js && node backend/tests/transcript_capture_test.js && node backend/tests/zoom_bot_test.js && node backend/tests/platform_attribution_test.js && node backend/tests/duplicate_upload_naming_test.js && node backend/tests/upload_and_search_api_test.js && node backend/tests/advanced_search_filter_test.js && node backend/tests/meeting_bot_api_test.js",
     "test:python": "python -m pytest -q ai-service/tests && python backend/tests/grounding_regression_test.py"
   },
   "dependencies": {

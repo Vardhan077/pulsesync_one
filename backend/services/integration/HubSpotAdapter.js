@@ -221,8 +221,9 @@ export class HubSpotAdapter extends BaseCrmAdapter {
     }));
   }
 
-  _buildUrl(type, id, portalId = '247215704') {
-    const pId = portalId || '247215704';
+  _buildUrl(type, id, portalId = '') {
+    const pId = portalId || process.env.HUBSPOT_PORTAL_ID || '';
+    if (!pId) return null;
     const typeMap = {
       contact: '0-1',
       company: '0-2',

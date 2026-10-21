@@ -371,7 +371,8 @@ CREATE TABLE public.meetings (
     call_type character varying(50) DEFAULT 'discovery'::character varying,
     call_type_confidence numeric(4,3) DEFAULT 0.94,
     call_type_source character varying(50) DEFAULT 'ai'::character varying,
-    call_type_rationale text
+    call_type_rationale text,
+    template_used character varying(100)
 );
 
 
