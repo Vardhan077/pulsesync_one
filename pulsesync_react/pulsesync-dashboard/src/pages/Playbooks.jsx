@@ -95,6 +95,8 @@ const TEMPLATES = [
 export default function Playbooks() {
   const [schema, setSchema] = useState(null);
   const [fields, setFields] = useState([]);
+  const [dbTemplates, setDbTemplates] = useState([]);
+  const [activeTemplateId, setActiveTemplateId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState(null);
@@ -138,7 +140,7 @@ export default function Playbooks() {
     return maps[name] || "None";
   };
 
-  // 1. Fetch Active Schema and Custom Fields
+  // 1. Fetch Active Schema, Custom Fields, and Database Playbook Templates
   useEffect(() => {
     const fetchSchemaAndFields = async () => {
       try {
@@ -160,6 +162,37 @@ export default function Playbooks() {
           crm_mapping: f.crm_mapping || getMockCrmMapping(f.name)
         }));
         setFields(sanitizedFields);
+
+        // Fetch database-backed playbook templates (Single Source of Truth)
+        try {
+          const profilesRes = await fetch(`${API_URL}/api/extraction-profiles`);
+          if (profilesRes.ok) {
+            const profilesData = await profilesRes.json();
+            if (Array.isArray(profilesData) && profilesData.length > 0) {
+              const mapped = profilesData.map(p => ({
+                id: p.id,
+                name: p.name,
+                category: p.name.toLowerCase().includes("sales") ? "Sales Qualification" : p.name.toLowerCase().includes("discovery") ? "Discovery" : "Playbook",
+                fieldsCount: Array.isArray(p.fields) ? p.fields.length : 0,
+                description: p.description || "Database-backed playbook framework.",
+                fields: (p.fields || []).map(f => ({
+                  id: f.id || `sf-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                  label: f.name || f.label || f.id,
+                  name: f.id || (f.name || '').toLowerCase().replace(/[^a-z0-9_]/g, '_'),
+                  field_type: f.type || f.field_type || 'string',
+                  description: f.description || '',
+                  prompt_hint: f.prompt_hint || f.ai_instruction || '',
+                  is_required: Boolean(f.evidence_required || f.is_required || f.required_for_review),
+                  crm_mapping: f.crm_mapping || getMockCrmMapping(f.id || f.name),
+                  options: Array.isArray(f.options) ? f.options : []
+                }))
+              }));
+              setDbTemplates(mapped);
+            }
+          }
+        } catch (profileErr) {
+          console.warn("Could not load database playbook profiles:", profileErr);
+        }
       } catch (err) {
         console.error(err);
         setStatusMessage({ type: "error", text: "Unable to connect to PulseSync Schema API." });
@@ -172,6 +205,7 @@ export default function Playbooks() {
 
   // 2. Choose template and load it
   const handleSelectTemplate = (tpl) => {
+    setActiveTemplateId(tpl.id);
     const newFields = tpl.fields.map(f => ({
       ...f,
       id: `sf-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
@@ -335,7 +369,10 @@ export default function Playbooks() {
       const response = await fetch(`${API_URL}/api/schemas/${schema.id}/fields`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fields })
+        body: JSON.stringify({ 
+          fields,
+          templateId: activeTemplateId || (fields.some(f => f.name === 'decision_process' || f.name === 'identify_pain') ? 'meddicc' : undefined)
+        })
       });
 
       if (!response.ok) throw new Error("Server failed to save dynamic fields");
@@ -418,7 +455,7 @@ export default function Playbooks() {
             </div>
             
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-              {TEMPLATES.map((tpl) => (
+              {(dbTemplates.length > 0 ? dbTemplates : TEMPLATES).map((tpl) => (
                 <div
                   key={tpl.id}
                   onClick={() => handleSelectTemplate(tpl)}

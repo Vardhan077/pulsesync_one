@@ -2569,8 +2569,10 @@ def is_currency_or_budget_field(fdef: dict) -> bool:
     fname = fdef.get("name", "").lower()
     if fname in ["budget", "project budget", "annual budget", "allocated budget", "cost"]:
         return True
-    text_corpus = f"{fdef.get('name', '')} {fdef.get('description', '')} {fdef.get('ai_instruction', '')} {fdef.get('id', '')}".lower()
-    return any(w in text_corpus for w in ["budget allocation", "allocated budget", "monetary amount", "annual cost", "financial allocation", "contract value", "pricing amount", "total spend"])
+    desc = str(fdef.get("description") or "").lower().strip()
+    if desc in ["budget", "project budget", "annual budget", "allocated budget", "cost", "spend", "pricing"]:
+        return True
+    return _field_semantic_family(fdef) == "budget"
 
 def is_date_or_timeline_field(fdef: dict) -> bool:
     if not isinstance(fdef, dict):
@@ -2909,8 +2911,10 @@ def _field_semantic_family(field_def: dict) -> str:
     field description. Field IDs are never treated as authoritative by themselves.
     """
     fdef = field_def or {}
-    parts = [str(fdef.get(k) or "") for k in ("id", "name", "description", "semantic_contract", "ai_instruction", "prompt_hint")]
-    corpus = " ".join(parts).lower().replace("_", " ")
+    desc_parts = [str(fdef.get(k) or "") for k in ("description", "semantic_contract", "ai_instruction", "prompt_hint")]
+    desc_corpus = " ".join(desc_parts).lower()
+    name_parts = [str(fdef.get(k) or "") for k in ("id", "name")]
+    name_corpus = " ".join(name_parts).lower().replace("_", " ")
     ftype = str(fdef.get("type") or fdef.get("field_type") or "text").lower().strip()
 
     if ftype == "currency":
@@ -2942,12 +2946,13 @@ def _field_semantic_family(field_def: dict) -> str:
     for family, terms in families.items():
         score = 0
         for term in terms:
-            if term in corpus:
-                # Multi-word semantic contracts are stronger than incidental single words.
-                score += 3 if " " in term or "-" in term else 1
-                # Exact field name match gets a small additional weight.
+            if term in desc_corpus:
+                # User's explicit guidelines/description take highest precedence!
+                score += 5 if (" " in term or "-" in term) else 4
+            elif term in name_corpus:
+                score += 2 if (" " in term or "-" in term) else 1
                 if str(fdef.get("name") or "").lower().strip() == term:
-                    score += 2
+                    score += 1
         if score:
             scores[family] = score
 
@@ -4000,7 +4005,8 @@ def deterministic_grounding_fallback(
                 if ckey in field_text_combined or any(ckey in t for t in field_tokens):
                     expanded_kws.extend(syns)
 
-            is_metrics = any(w in (fid + " " + fname).lower() for w in ["metrics", "metric", "roi", "quantifiable", "economic value"])
+            is_budget_override = is_currency_or_budget_field(fdef)
+            is_metrics = not is_budget_override and any(w in (fid + " " + fname).lower() for w in ["metrics", "metric", "roi", "quantifiable", "economic value"])
             is_pain = any(w in (fid + " " + fname).lower() for w in ["pain", "problem", "bottleneck", "challenge", "friction", "struggle", "burden"])
             is_need = any(w in (fid + " " + fname).lower() for w in ["need", "requirement", "objective", "goal"])
             is_decision_criteria = any(w in (fid + " " + fname).lower() for w in ["criteria", "decision criteria", "selection criteria"])
@@ -4361,7 +4367,7 @@ def generate_dynamic_extraction_prompt(schema_fields: list = None, profile: dict
         name = field.get("name") or field.get("id") or "field"
         ftype = field.get("field_type") or field.get("type") or "string"
         desc = field.get("description", "")
-        hint = field.get("prompt_hint", "")
+        hint = field.get("prompt_hint") or field.get("ai_instruction") or ""
         lines.append(f"- {name}: {desc}")
         if hint:
             lines.append(f"  Hint: {hint}")
