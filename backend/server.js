@@ -2658,22 +2658,205 @@ app.post('/api/meetings/:id/compile', async (req, res, next) => {
       workflow_state = meeting.workflow_state;
     }
 
+    // 1. Resolve Extraction Profile strictly from Database (Single Source of Truth)
+    let targetProfile = null;
+    const defaultWorkspaceId = '00000000-0000-0000-0000-000000000001';
+    const workspaceId = (meeting && meeting.workspace_id) || defaultWorkspaceId;
+    const requestedPlaybookId = templateId || profileId || (profile && typeof profile === 'object' ? profile.id : null);
+
+    if (requestedPlaybookId) {
+      // Query the database for the requested playbook/profile by ID
+      if (!useFallbackDb) {
+        // First look in extraction_profiles (workspace scoped or system template)
+        const pRes = await pool.query(
+          'SELECT * FROM extraction_profiles WHERE id = $1 AND (workspace_id = $2 OR workspace_id IS NULL)',
+          [requestedPlaybookId, workspaceId]
+        );
+        if (pRes.rows.length > 0) {
+          targetProfile = pRes.rows[0];
+        } else {
+          // If not in extraction_profiles, check if it's an extraction_schemas id
+          const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestedPlaybookId);
+          if (isUuid) {
+            const sRes = await pool.query(
+              'SELECT s.id, s.workspace_id FROM extraction_schemas s WHERE s.id = $1 AND (s.workspace_id = $2 OR s.workspace_id IS NULL)',
+              [requestedPlaybookId, workspaceId]
+            );
+            if (sRes.rows.length > 0) {
+              const fRes = await pool.query(
+                'SELECT name, label, field_type, description, prompt_hint, is_required, sort_order, options FROM schema_fields WHERE schema_id = $1 ORDER BY sort_order ASC',
+                [sRes.rows[0].id]
+              );
+              const schemaFieldsList = fRes.rows.map(f => ({
+                id: (f.name || f.label || '').toLowerCase().replace(/[^a-z0-9_]/g, '_').trim(),
+                name: f.label || f.name,
+                type: f.field_type || 'text',
+                description: f.description || '',
+                prompt_hint: f.prompt_hint || '',
+                ai_instruction: f.prompt_hint || '',
+                semantic_contract: f.description || '',
+                evidence_required: Boolean(f.is_required),
+                required_for_review: Boolean(f.is_required),
+                enabled: true,
+                options: Array.isArray(f.options) ? f.options : []
+              }));
+              targetProfile = {
+                id: sRes.rows[0].id,
+                workspace_id: sRes.rows[0].workspace_id,
+                name: 'Workspace Schema Playbook',
+                description: 'Playbook defined in workspace schema fields',
+                summary_sections: EXTRACTION_PROFILE_TEMPLATES[0].summary_sections,
+                fields: schemaFieldsList,
+                action_items_enabled: true,
+                risks_enabled: true,
+                objections_enabled: true,
+                is_active: true
+              };
+            }
+          }
+        }
+      } else {
+        const data = readFallbackDb();
+        targetProfile = (data.extraction_profiles || []).find(
+          p => p.id === requestedPlaybookId && (p.workspace_id === workspaceId || !p.workspace_id)
+        ) || null;
+        if (!targetProfile) {
+          const schema = (data.extraction_schemas || []).find(
+            s => s.id === requestedPlaybookId && (s.workspace_id === workspaceId || !s.workspace_id)
+          );
+          if (schema) {
+            const fields = (data.schema_fields || [])
+              .filter(f => f.schema_id === schema.id)
+              .sort((a, b) => a.sort_order - b.sort_order)
+              .map(f => ({
+                id: (f.name || f.label || '').toLowerCase().replace(/[^a-z0-9_]/g, '_').trim(),
+                name: f.label || f.name,
+                type: f.field_type || 'text',
+                description: f.description || '',
+                prompt_hint: f.prompt_hint || '',
+                ai_instruction: f.prompt_hint || '',
+                semantic_contract: f.description || '',
+                evidence_required: Boolean(f.is_required),
+                required_for_review: Boolean(f.is_required),
+                enabled: true,
+                options: f.options || []
+              }));
+            targetProfile = {
+              id: schema.id,
+              workspace_id: schema.workspace_id,
+              name: 'Workspace Schema Playbook',
+              description: 'Playbook defined in workspace schema fields',
+              summary_sections: EXTRACTION_PROFILE_TEMPLATES[0].summary_sections,
+              fields,
+              action_items_enabled: true,
+              risks_enabled: true,
+              objections_enabled: true,
+              is_active: true
+            };
+          }
+        }
+      }
+
+      // Critical constraint: If an explicit playbook was requested but NOT found in DB,
+      // DO NOT silently fall back to default or active profile! Return a clear 404 error!
+      if (!targetProfile) {
+        logger.warn({ requestedPlaybookId, workspaceId, meetingId }, 'Requested playbook configuration not found in database.');
+        return res.status(404).json({
+          error: 'playbook_not_found',
+          message: `Selected playbook "${requestedPlaybookId}" was not found in the database for the active workspace. No fallback substitution allowed.`,
+          requestedPlaybookId
+        });
+      }
+    } else {
+      // No specific playbook was requested; load active workspace profile from DB
+      if (!useFallbackDb) {
+        const pRes = await pool.query(
+          'SELECT * FROM extraction_profiles WHERE workspace_id = $1 AND is_active = true LIMIT 1',
+          [workspaceId]
+        );
+        if (pRes.rows.length > 0) targetProfile = pRes.rows[0];
+      } else {
+        const data = readFallbackDb();
+        targetProfile = (data.extraction_profiles || []).find(
+          p => p.workspace_id === workspaceId && p.is_active
+        ) || null;
+      }
+
+      if (!targetProfile) {
+        return res.status(404).json({
+          error: 'no_active_playbook',
+          message: 'No active playbook found in the database for this workspace. Please select or activate a playbook before extraction.'
+        });
+      }
+    }
+
     // Record template used before compilation
+    const effectivePlaybookId = targetProfile.id;
     if (!useFallbackDb) {
-      await pool.query("UPDATE meetings SET template_used = $1, updated_at = NOW() WHERE id = $2", [templateId, meetingId]);
+      await pool.query("UPDATE meetings SET template_used = $1, updated_at = NOW() WHERE id = $2", [effectivePlaybookId, meetingId]);
+      if (companyMetadata?.name && companyMetadata.name.trim()) {
+        const trimmedName = companyMetadata.name.trim();
+        let compId = meeting?.company_id || null;
+        if (compId) {
+          await pool.query(
+            `UPDATE companies 
+             SET name = $1, 
+                 website = COALESCE($2, website), 
+                 industry = COALESCE($3, industry) 
+             WHERE id = $4`,
+            [trimmedName, companyMetadata.website || null, companyMetadata.industry || null, compId]
+          );
+        } else {
+          const existingComp = await pool.query('SELECT id FROM companies WHERE LOWER(name) = LOWER($1) LIMIT 1', [trimmedName]);
+          if (existingComp.rows.length > 0) {
+            compId = existingComp.rows[0].id;
+          } else {
+            compId = crypto.randomUUID();
+            await pool.query(
+              'INSERT INTO companies (id, name, website, industry) VALUES ($1, $2, $3, $4)',
+              [compId, trimmedName, companyMetadata.website || null, companyMetadata.industry || null]
+            );
+          }
+          await pool.query('UPDATE meetings SET company_id = $1 WHERE id = $2', [compId, meetingId]);
+          if (meeting) meeting.company_id = compId;
+        }
+      }
     } else {
       const data = readFallbackDb();
       const m = data.meetings.find(m => m.id === meetingId);
       if (m) {
-        m.template_used = templateId;
-        if (companyMetadata?.name) {
-          m.company_name = companyMetadata.name;
+        m.template_used = effectivePlaybookId;
+        if (companyMetadata?.name && companyMetadata.name.trim()) {
+          const trimmedName = companyMetadata.name.trim();
+          let comp = (data.companies || []).find(c => c.id === m.company_id);
+          if (comp) {
+            comp.name = trimmedName;
+            if (companyMetadata.website) comp.website = companyMetadata.website;
+            if (companyMetadata.industry) comp.industry = companyMetadata.industry;
+          } else {
+            comp = (data.companies || []).find(c => c.name?.toLowerCase() === trimmedName.toLowerCase());
+            if (!comp) {
+              comp = {
+                id: crypto.randomUUID(),
+                workspace_id: workspaceId || '00000000-0000-0000-0000-000000000001',
+                name: trimmedName,
+                website: companyMetadata.website || '',
+                industry: companyMetadata.industry || '',
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString()
+              };
+              if (!data.companies) data.companies = [];
+              data.companies.push(comp);
+            }
+            m.company_id = comp.id;
+          }
+          if (meeting) meeting.company_id = m.company_id;
         }
         writeFallbackDb(data);
       }
     }
 
-    // 1. Fetch the verified segments & speaker mappings
+    // 2. Fetch the verified segments & speaker mappings
     let segments = [];
     let speaker_mapping = [];
     let company = {};
@@ -2727,57 +2910,54 @@ app.post('/api/meetings/:id/compile', async (req, res, next) => {
       }
     }
 
-    // 2. Resolve Extraction Profile (Rule 1, 2, 3, 24, 28, 29)
-    let targetProfile = null;
-    const defaultWorkspaceId = '00000000-0000-0000-0000-000000000001';
+    // 3. Normalize profile and fields to forward complete database guidelines to AI engine
+    const rawFields = typeof targetProfile.fields === 'string'
+      ? JSON.parse(targetProfile.fields)
+      : (targetProfile.fields || []);
+    const rawSections = typeof targetProfile.summary_sections === 'string'
+      ? JSON.parse(targetProfile.summary_sections)
+      : (targetProfile.summary_sections || []);
 
-    if (profile && typeof profile === 'object' && profile.fields) {
-      targetProfile = profile;
-    } else if (profileId) {
-      if (!useFallbackDb) {
-        const pRes = await pool.query('SELECT * FROM extraction_profiles WHERE id = $1', [profileId]);
-        if (pRes.rows.length > 0) targetProfile = pRes.rows[0];
-      } else {
-        const data = readFallbackDb();
-        targetProfile = data.extraction_profiles.find(p => p.id === profileId) || null;
-      }
-    }
+    const normalizedProfileFields = rawFields.map(f => {
+      const hint = f.prompt_hint || f.ai_instruction || f.guideline || '';
+      return {
+        ...f,
+        id: f.id || (f.name || '').toLowerCase().replace(/[^a-z0-9_]/g, '_').trim(),
+        name: f.name || f.label || f.id,
+        type: f.type || f.field_type || 'text',
+        description: f.description || '',
+        prompt_hint: hint,
+        ai_instruction: hint,
+        semantic_contract: f.semantic_contract || f.description || '',
+        evidence_required: f.evidence_required !== undefined ? Boolean(f.evidence_required) : true,
+        required_for_review: Boolean(f.required_for_review || f.is_required),
+        options: Array.isArray(f.options) ? f.options : []
+      };
+    });
 
-    if (!targetProfile && templateId) {
-      const tid = templateId.toLowerCase().trim();
-      const matchedTmpl = EXTRACTION_PROFILE_TEMPLATES.find(t => t.id.toLowerCase() === tid || t.name.toLowerCase() === tid);
-      if (matchedTmpl) {
-        targetProfile = matchedTmpl;
-      }
-    }
-
-    if (!targetProfile) {
-      // Load active workspace profile
-      if (!useFallbackDb) {
-        const pRes = await pool.query('SELECT * FROM extraction_profiles WHERE workspace_id = $1 AND is_active = true LIMIT 1', [defaultWorkspaceId]);
-        if (pRes.rows.length > 0) targetProfile = pRes.rows[0];
-      } else {
-        const data = readFallbackDb();
-        targetProfile = data.extraction_profiles.find(p => p.workspace_id === defaultWorkspaceId && p.is_active) || null;
-      }
-    }
-
-    // Default Fallback: PulseSync Default Sales Intelligence (Rule 3, 24, 29)
-    if (!targetProfile) {
-      targetProfile = EXTRACTION_PROFILE_TEMPLATES.find(t => t.id === 'default_sales_intelligence');
-    }
+    const targetProfileToPass = {
+      ...targetProfile,
+      summary_sections: rawSections,
+      fields: normalizedProfileFields
+    };
 
     const template = {
       id: targetProfile.id,
-      name: targetProfile.name
+      name: targetProfile.name,
+      description: targetProfile.description || ''
     };
 
-    const schemaFields = (targetProfile.fields || []).map(f => ({
+    const schemaFields = normalizedProfileFields.map(f => ({
       name: f.id,
       label: f.name,
-      field_type: f.type || 'text',
-      description: f.description || '',
-      options: f.options || []
+      field_type: f.type,
+      description: f.description,
+      prompt_hint: f.prompt_hint,
+      ai_instruction: f.ai_instruction,
+      semantic_contract: f.semantic_contract,
+      is_required: f.required_for_review || f.evidence_required,
+      evidence_required: f.evidence_required,
+      options: f.options
     }));
 
     // 3. Retrieve memories for company
@@ -2826,12 +3006,12 @@ app.post('/api/meetings/:id/compile', async (req, res, next) => {
           speaker_mapping: speaker_mapping,
           company: company,
           template: template,
-          profile: targetProfile,
+          profile: targetProfileToPass,
           call_context: {
             call_type: targetCallType,
             company: company,
             meeting_title: (meeting && meeting.title) || undefined,
-            profile: targetProfile
+            profile: targetProfileToPass
           },
           schema_fields: schemaFields,
           memories: memories,
@@ -2946,7 +3126,7 @@ app.post('/api/meetings/:id/compile', async (req, res, next) => {
           template_fields: validatedIntelligence.template_fields || [],
           fields: validatedIntelligence.fields || [],
           summary_sections: validatedIntelligence.summary_sections || [],
-          profile: targetProfile,
+          profile: targetProfileToPass,
           conversation_intelligence: validatedIntelligence.conversation_intelligence || aiResult.conversation_intelligence || null
         })]
       );
@@ -3121,7 +3301,7 @@ app.post('/api/meetings/:id/compile', async (req, res, next) => {
           template_fields: validatedIntelligence.template_fields || [],
           fields: validatedIntelligence.fields || [],
           summary_sections: validatedIntelligence.summary_sections || [],
-          profile: targetProfile,
+          profile: targetProfileToPass,
           conversation_intelligence: validatedIntelligence.conversation_intelligence || aiResult.conversation_intelligence || null
         },
         created_at: new Date().toISOString()
@@ -4132,39 +4312,57 @@ app.post('/api/schemas/:id/fields', async (req, res, next) => {
     const fields = req.body.fields || [];
     const defaultWorkspaceId = '00000000-0000-0000-0000-000000000001';
 
+    const isUuid = (str) => typeof str === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
+
     const profileFields = fields.map(f => {
       const fieldName = (f.name || f.label || '').toLowerCase().replace(/[^a-z0-9_]/g, '_').trim();
+      const hint = f.prompt_hint || f.ai_instruction || '';
       return {
         id: fieldName,
         name: (f.label || f.name || fieldName).trim(),
-        type: f.field_type || 'text',
-        description: f.description || f.prompt_hint || '',
-        evidence_required: Boolean(f.is_required),
+        type: f.field_type || f.type || 'text',
+        description: f.description || '',
+        prompt_hint: hint,
+        ai_instruction: hint,
+        semantic_contract: f.semantic_contract || f.description || '',
+        evidence_required: Boolean(f.is_required || f.evidence_required),
+        required_for_review: Boolean(f.is_required || f.required_for_review),
         enabled: true,
-        options: f.options || []
+        options: Array.isArray(f.options) ? f.options : []
       };
     });
     
     if (!useFallbackDb) {
       await pool.query('BEGIN');
       await pool.query('DELETE FROM schema_fields WHERE schema_id = $1', [schemaId]);
+      const seenNames = new Set();
       for (let i = 0; i < fields.length; i++) {
         const f = fields[i];
-        const fieldName = f.name.toLowerCase().replace(/[^a-z0-9_]/g, '_').trim();
+        let fieldName = (f.name || f.label || f.id || `field_${i}`).toLowerCase().replace(/[^a-z0-9_]/g, '_').trim();
+        if (!fieldName) fieldName = `field_${i}`;
+        if (seenNames.has(fieldName)) {
+          fieldName = `${fieldName}_${i}`;
+        }
+        seenNames.add(fieldName);
+
+        const fieldLabel = (f.label || f.name || fieldName).trim();
+        const fieldType = f.field_type || f.type || 'string';
+        const fieldId = isUuid(f.id) ? f.id : crypto.randomUUID();
+
         await pool.query(
           `INSERT INTO schema_fields (id, schema_id, name, label, field_type, description, prompt_hint, is_required, sort_order, options)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
           [
-            f.id && f.id.length > 10 ? f.id : crypto.randomUUID(),
+            fieldId,
             schemaId,
             fieldName,
-            f.label.trim(),
-            f.field_type,
+            fieldLabel,
+            fieldType,
             f.description || '',
-            f.prompt_hint || '',
-            f.is_required || false,
+            f.prompt_hint || f.ai_instruction || '',
+            Boolean(f.is_required),
             i,
-            JSON.stringify(f.options || [])
+            JSON.stringify(Array.isArray(f.options) ? f.options : [])
           ]
         );
       }
@@ -4194,27 +4392,60 @@ app.post('/api/schemas/:id/fields', async (req, res, next) => {
         );
       }
 
+      // Synchronize changes to targeted or matching catalog profile (e.g. meddicc / bant)
+      const targetTemplateId = req.body.templateId || req.body.profileId;
+      if (targetTemplateId) {
+        await pool.query(
+          'UPDATE extraction_profiles SET fields = $1, updated_at = NOW() WHERE id = $2 AND (workspace_id = $3 OR workspace_id IS NULL)',
+          [JSON.stringify(profileFields), targetTemplateId, defaultWorkspaceId]
+        );
+      } else {
+        const fNames = profileFields.map(f => f.id);
+        if (fNames.includes('metrics') && fNames.includes('decision_criteria') && fNames.includes('economic_buyer')) {
+          await pool.query(
+            'UPDATE extraction_profiles SET fields = $1, updated_at = NOW() WHERE id = $2 AND (workspace_id = $3 OR workspace_id IS NULL)',
+            [JSON.stringify(profileFields), 'meddicc', defaultWorkspaceId]
+          );
+        } else if (fNames.includes('project_budget') && fNames.includes('decision_authority')) {
+          await pool.query(
+            'UPDATE extraction_profiles SET fields = $1, updated_at = NOW() WHERE id = $2 AND (workspace_id = $3 OR workspace_id IS NULL)',
+            [JSON.stringify(profileFields), 'bant', defaultWorkspaceId]
+          );
+        }
+      }
+
       await pool.query('COMMIT');
       res.json({ ok: true, message: 'Fields saved successfully.', count: fields.length });
     } else {
       const data = readFallbackDb();
       // Remove existing fields
-      data.schema_fields = data.schema_fields.filter(f => f.schema_id !== schemaId);
+      data.schema_fields = (data.schema_fields || []).filter(f => f.schema_id !== schemaId);
       
+      const seenNames = new Set();
       // Push new fields
       fields.forEach((f, idx) => {
-        const fieldName = f.name.toLowerCase().replace(/[^a-z0-9_]/g, '_').trim();
+        let fieldName = (f.name || f.label || f.id || `field_${idx}`).toLowerCase().replace(/[^a-z0-9_]/g, '_').trim();
+        if (!fieldName) fieldName = `field_${idx}`;
+        if (seenNames.has(fieldName)) {
+          fieldName = `${fieldName}_${idx}`;
+        }
+        seenNames.add(fieldName);
+
+        const fieldLabel = (f.label || f.name || fieldName).trim();
+        const fieldType = f.field_type || f.type || 'string';
+        const fieldId = isUuid(f.id) ? f.id : crypto.randomUUID();
+
         data.schema_fields.push({
-          id: f.id && f.id.length > 10 ? f.id : crypto.randomUUID(),
+          id: fieldId,
           schema_id: schemaId,
           name: fieldName,
-          label: f.label.trim(),
-          field_type: f.field_type,
+          label: fieldLabel,
+          field_type: fieldType,
           description: f.description || '',
-          prompt_hint: f.prompt_hint || '',
-          is_required: f.is_required || false,
+          prompt_hint: f.prompt_hint || f.ai_instruction || '',
+          is_required: Boolean(f.is_required),
           sort_order: idx,
-          options: f.options || []
+          options: Array.isArray(f.options) ? f.options : []
         });
       });
 
@@ -4245,6 +4476,7 @@ app.post('/api/schemas/:id/fields', async (req, res, next) => {
       res.json({ ok: true, message: 'Fields saved successfully in local JSON.', count: fields.length });
     }
   } catch (error) {
+    logger.error({ err: error, schemaId: req.params.id }, 'Failed to save schema fields');
     if (!useFallbackDb) await pool.query('ROLLBACK').catch(() => {});
     next(error);
   }
@@ -4294,7 +4526,7 @@ async function syncProfileFieldsToSchema(fields) {
               (f.name || f.label || fieldName).trim(),
               f.type || f.field_type || 'string',
               f.description || '',
-              f.prompt_hint || '',
+              f.prompt_hint || f.ai_instruction || '',
               Boolean(f.evidence_required || f.is_required),
               i,
               JSON.stringify(f.options || [])
@@ -4316,7 +4548,7 @@ async function syncProfileFieldsToSchema(fields) {
             label: (f.name || f.label || fieldName).trim(),
             field_type: f.type || f.field_type || 'string',
             description: f.description || '',
-            prompt_hint: f.prompt_hint || '',
+            prompt_hint: f.prompt_hint || f.ai_instruction || '',
             is_required: Boolean(f.evidence_required || f.is_required),
             sort_order: idx,
             options: f.options || []
@@ -4415,16 +4647,65 @@ app.get('/api/extraction-profiles/active', async (req, res, next) => {
   }
 });
 
-// 3. Get Extraction Profile Templates
-app.get('/api/extraction-profiles/templates', async (_req, res) => {
-  res.json(EXTRACTION_PROFILE_TEMPLATES);
+// 3. Get Single Extraction Profile by ID
+app.get('/api/extraction-profiles/:id', async (req, res, next) => {
+  try {
+    const defaultWorkspaceId = '00000000-0000-0000-0000-000000000001';
+    const profileId = req.params.id;
+
+    if (!useFallbackDb) {
+      const result = await pool.query(
+        'SELECT * FROM extraction_profiles WHERE id = $1 AND (workspace_id = $2 OR workspace_id IS NULL)',
+        [profileId, defaultWorkspaceId]
+      );
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'not_found', message: `Extraction profile "${profileId}" not found` });
+      }
+      res.json(result.rows[0]);
+    } else {
+      const data = readFallbackDb();
+      const profile = (data.extraction_profiles || []).find(
+        p => p.id === profileId && (p.workspace_id === defaultWorkspaceId || !p.workspace_id)
+      );
+      if (!profile) {
+        return res.status(404).json({ error: 'not_found', message: `Extraction profile "${profileId}" not found` });
+      }
+      res.json(profile);
+    }
+  } catch (error) {
+    next(error);
+  }
 });
 
-// 4. Create an Extraction Profile
+// 4. Get Extraction Profile Templates (Database-driven)
+app.get('/api/extraction-profiles/templates', async (req, res, next) => {
+  try {
+    const defaultWorkspaceId = '00000000-0000-0000-0000-000000000001';
+    if (!useFallbackDb) {
+      const result = await pool.query(
+        'SELECT * FROM extraction_profiles WHERE workspace_id = $1 OR workspace_id IS NULL ORDER BY created_at ASC',
+        [defaultWorkspaceId]
+      );
+      if (result.rows.length > 0) {
+        return res.json(result.rows);
+      }
+    } else {
+      const data = readFallbackDb();
+      if (data.extraction_profiles && data.extraction_profiles.length > 0) {
+        return res.json(data.extraction_profiles);
+      }
+    }
+    res.json(EXTRACTION_PROFILE_TEMPLATES);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 5. Create an Extraction Profile
 app.post('/api/extraction-profiles', async (req, res, next) => {
   try {
     const defaultWorkspaceId = '00000000-0000-0000-0000-000000000001';
-    const {
+    let {
       id,
       name,
       description,
@@ -4441,6 +4722,24 @@ app.post('/api/extraction-profiles', async (req, res, next) => {
     }
 
     const profileId = id || name.toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 50) + '_' + crypto.randomUUID().slice(0, 8);
+
+    const normalizedFields = (fields || []).map(f => {
+      const hint = f.prompt_hint || f.ai_instruction || f.guideline || '';
+      return {
+        ...f,
+        id: f.id || (f.name || '').toLowerCase().replace(/[^a-z0-9_]/g, '_').trim(),
+        name: f.name || f.label || f.id,
+        type: f.type || f.field_type || 'text',
+        description: f.description || '',
+        prompt_hint: hint,
+        ai_instruction: hint,
+        semantic_contract: f.semantic_contract || f.description || '',
+        evidence_required: f.evidence_required !== undefined ? Boolean(f.evidence_required) : true,
+        required_for_review: Boolean(f.required_for_review || f.is_required),
+        options: Array.isArray(f.options) ? f.options : []
+      };
+    });
+    fields = normalizedFields;
 
     if (!useFallbackDb) {
       if (is_active) {
@@ -4504,7 +4803,7 @@ app.post('/api/extraction-profiles', async (req, res, next) => {
   }
 });
 
-// 5. Update an Extraction Profile
+// 6. Update an Extraction Profile
 app.put('/api/extraction-profiles/:id', async (req, res, next) => {
   try {
     const profileId = req.params.id;
@@ -4519,6 +4818,26 @@ app.put('/api/extraction-profiles/:id', async (req, res, next) => {
       extract_objections,
       is_active
     } = req.body;
+
+    let normalizedFields = null;
+    if (fields !== undefined && Array.isArray(fields)) {
+      normalizedFields = fields.map(f => {
+        const hint = f.prompt_hint || f.ai_instruction || f.guideline || '';
+        return {
+          ...f,
+          id: f.id || (f.name || '').toLowerCase().replace(/[^a-z0-9_]/g, '_').trim(),
+          name: f.name || f.label || f.id,
+          type: f.type || f.field_type || 'text',
+          description: f.description || '',
+          prompt_hint: hint,
+          ai_instruction: hint,
+          semantic_contract: f.semantic_contract || f.description || '',
+          evidence_required: f.evidence_required !== undefined ? Boolean(f.evidence_required) : true,
+          required_for_review: Boolean(f.required_for_review || f.is_required),
+          options: Array.isArray(f.options) ? f.options : []
+        };
+      });
+    }
 
     if (!useFallbackDb) {
       if (is_active) {
@@ -4541,7 +4860,7 @@ app.put('/api/extraction-profiles/:id', async (req, res, next) => {
           name ? name.trim() : null,
           description !== undefined ? description : null,
           summary_sections ? JSON.stringify(summary_sections) : null,
-          fields ? JSON.stringify(fields) : null,
+          normalizedFields ? JSON.stringify(normalizedFields) : null,
           extract_action_items !== undefined ? extract_action_items : (req.body.action_items_enabled !== undefined ? req.body.action_items_enabled : null),
           extract_risks !== undefined ? extract_risks : (req.body.risks_enabled !== undefined ? req.body.risks_enabled : null),
           extract_objections !== undefined ? extract_objections : (req.body.objections_enabled !== undefined ? req.body.objections_enabled : null),
@@ -4572,7 +4891,7 @@ app.put('/api/extraction-profiles/:id', async (req, res, next) => {
       if (name !== undefined) profile.name = name.trim();
       if (description !== undefined) profile.description = description;
       if (summary_sections !== undefined) profile.summary_sections = summary_sections;
-      if (fields !== undefined) profile.fields = fields;
+      if (normalizedFields !== null) profile.fields = normalizedFields;
       if (extract_action_items !== undefined) profile.extract_action_items = extract_action_items;
       if (extract_risks !== undefined) profile.extract_risks = extract_risks;
       if (extract_objections !== undefined) profile.extract_objections = extract_objections;

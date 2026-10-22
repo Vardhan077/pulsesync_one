@@ -56,14 +56,7 @@ import {
 
 import SyncConfirmationModal from "../components/review/SyncConfirmationModal";
 
-const POPULAR_TEMPLATES = [
-  { id: "default_sales_intelligence", name: "PulseSync Default Sales Intelligence", description: "Default profile with 7 comprehensive summary sections and 9 grounded commercial fields.", fieldsCount: 9 },
-  { id: "sales_discovery", name: "Sales Discovery", description: "Customer requirements, pain points, timeline, and deal qualification.", fieldsCount: 5 },
-  { id: "technical_discovery", name: "Technical Discovery", description: "Architecture, security requirements, integrations, data volume, and SLAs.", fieldsCount: 6 },
-  { id: "customer_success", name: "Customer Success", description: "Account health, feature requests, adoption, and renewal risks.", fieldsCount: 4 },
-  { id: "meddicc", name: "MEDDICC", description: "Metrics, Economic Buyer, Decision Criteria, Decision Process, Identify Pain, Champion, Competition.", fieldsCount: 7 },
-  { id: "bant", name: "BANT", description: "Budget, Authority, Need, and Timeline qualification.", fieldsCount: 4 }
-];
+const POPULAR_TEMPLATES = [];
 
 const formatCallType = (type) => {
   if (!type) return "Discovery";
@@ -164,15 +157,24 @@ export default function Dashboard() {
   const [dynamicSummarySections, setDynamicSummarySections] = useState([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
 
-  // Dynamic profile catalogue. Existing static templates remain available as a fallback.
+  // Database-backed extraction profiles catalogue (Single Source of Truth)
   useEffect(() => {
     let cancelled = false;
     fetch(`${API_URL}/api/extraction-profiles`)
       .then((res) => (res.ok ? res.json() : []))
       .then((profiles) => {
-        if (!cancelled && Array.isArray(profiles)) setExtractionProfiles(profiles);
+        if (!cancelled && Array.isArray(profiles)) {
+          setExtractionProfiles(profiles);
+          setSelectedTemplate((current) => {
+            if (current && profiles.some((p) => p.id === current)) return current;
+            const active = profiles.find((p) => p.is_active);
+            return active?.id || profiles[0]?.id || "default_sales_intelligence";
+          });
+        }
       })
-      .catch(() => { /* static templates remain available */ });
+      .catch((err) => {
+        console.warn("Could not load extraction profiles from database:", err);
+      });
     return () => { cancelled = true; };
   }, [API_URL]);
 
@@ -639,21 +641,16 @@ export default function Dashboard() {
 
       const segs = json.segments || [];
 
-      // Resolve profile dynamically
+      // Resolve profile dynamically from database records or saved run snapshot
       const templateKey = json.meeting?.template_used || extractionsObj?.profile?.id || selectedTemplate;
       const matchedWorkspaceProfile = extractionProfiles.find(
         (p) => p.id === templateKey || p.name?.toLowerCase() === String(templateKey).toLowerCase()
       );
-      const matchedPopularTemplate = POPULAR_TEMPLATES.find(
-        (p) => p.id === templateKey || p.name?.toLowerCase() === String(templateKey).toLowerCase()
-      );
-      const resolvedProfile = extractionsObj?.profile || matchedWorkspaceProfile || (matchedPopularTemplate ? {
-        id: matchedPopularTemplate.id,
-        name: matchedPopularTemplate.name,
-        description: matchedPopularTemplate.description,
-        fields: []
-      } : null);
+      const resolvedProfile = extractionsObj?.profile || matchedWorkspaceProfile || null;
       setActiveExtractionProfile(resolvedProfile);
+      if (templateKey && (!selectedTemplate || selectedTemplate !== templateKey)) {
+        setSelectedTemplate(templateKey);
+      }
 
       // Snapshot metadata retained for existing downstream views
       let snapshot = json.meeting?.ai_snapshot || {};
@@ -1524,16 +1521,14 @@ export default function Dashboard() {
   const isMeetingSynced = meetingDetails?.meeting?.workflow_state === 'synced';
   const isHubSpotConnected = integrationsList.some(i => i.provider === 'hubspot' && i.connection_status === 'connected');
 
-  const templateOptions = [
-    ...extractionProfiles.map((profile) => ({
-      id: profile.id,
-      name: profile.name,
-      description: profile.description,
-      fieldsCount: Array.isArray(profile.fields) ? profile.fields.length : 0,
-      source: "workspace"
-    })),
-    ...POPULAR_TEMPLATES.filter((preset) => !extractionProfiles.some((profile) => profile.id === preset.id))
-  ];
+  const templateOptions = extractionProfiles.map((profile) => ({
+    id: profile.id,
+    name: profile.name,
+    description: profile.description,
+    fieldsCount: Array.isArray(profile.fields) ? profile.fields.length : 0,
+    source: "database",
+    is_active: Boolean(profile.is_active)
+  }));
 
   const displaySpeakers = (speakers && speakers.length > 0)
     ? speakers
