@@ -589,8 +589,7 @@ export default function CallDetails({
                     // Explicit metrics vs budget distinction callout
                     const isMetrics = fKey.toLowerCase() === "metrics";
                     // Past target timeline detection
-                    const isPastTimeline = (fKey.toLowerCase() === "timeline" || fKey.toLowerCase() === "implementation_timeline") ||
-                      /october 15|before oct/i.test(String(rawVal) + " " + evidenceList.map((e) => e.quote).join(" "));
+                    const isPastTimeline = field.qualification === 'past_target_requires_reconfirmation' || Boolean(field.qualification_note);
 
                     return (
                       <div
@@ -665,7 +664,7 @@ export default function CallDetails({
                           <div className="p-2 rounded bg-amber-50 border border-amber-200 text-amber-900 text-[10.5px] flex items-center gap-1.5">
                             <AlertCircle size={13} className="text-amber-600 flex-shrink-0" />
                             <span>
-                              <strong>Past-Target Warning:</strong> Priya referenced "before October 15th" as an aspirational readiness goal. Since this call occurred on October 21, 2026, this timeline requires active reconfirmation.
+                              <strong>Past-Target Warning:</strong> {field.qualification_note || "Target date precedes call date; timeline requires active reconfirmation."}
                             </span>
                           </div>
                         )}
@@ -730,7 +729,7 @@ export default function CallDetails({
                   {actionItems.map((item, idx) => {
                     const task = typeof item === "object" ? item.task : item;
                     const owner = typeof item === "object" ? item.owner : "Unassigned";
-                    const isBuyer = item.commitment_type === "buyer_commitment" || item.owner_role === "buyer" || /priya|buyer/i.test(owner);
+                    const isBuyer = item.commitment_type === "buyer_commitment" || item.owner_role === "buyer" || /buyer|prospect|client|customer/i.test(owner);
 
                     return (
                       <div

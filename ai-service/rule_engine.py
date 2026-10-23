@@ -197,6 +197,9 @@ class DynamicRuleEngine:
                 ev_m = re.findall(r"(?:[$€£]\s*\d[\d,]*(?:\.\d+)?(?:\s*[kKmM])?|\b\d[\d,]*(?:\.\d+)?\s*(?:usd|dollars|eur|euros|gbp|pounds)\b)", evidence_text, re.I)
                 if ev_m:
                     return True, ev_m[-1], None
+                # Support qualitative / earmarked budget discussions where numeric figure is pending
+                if any(w in (sval + " " + ev_low) for w in ["earmark", "allocated", "allocation", "budgeted", "funding", "business case"]):
+                    return True, sval, None
                 return False, None, "Currency field lacks monetary expression"
             return True, m[-1], None
 

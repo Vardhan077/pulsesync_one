@@ -64,6 +64,40 @@ function SectionTitle({ eyebrow, title, icon }) {
   );
 }
 
+function renderFormattedSummary(rawText) {
+  if (!rawText) return "Summary not available for this session.";
+  const lines = String(rawText).split("\n").filter((line) => line.trim().length > 0);
+  return (
+    <div className="space-y-1.5">
+      {lines.map((line, idx) => {
+        const headerMatch = line.match(/^\*\*(.+?):\*\*\s*(.*)$/);
+        if (headerMatch) {
+          return (
+            <p key={idx} className="leading-relaxed">
+              <span className="font-bold text-[#0F172A]">{headerMatch[1]}: </span>
+              <span className="text-[#334155]">{headerMatch[2]}</span>
+            </p>
+          );
+        }
+        if (line.includes("**")) {
+          const parts = line.split(/(\*\*.*?\*\*)/g);
+          return (
+            <p key={idx} className="leading-relaxed text-[#334155]">
+              {parts.map((p, pIdx) => {
+                if (p.startsWith("**") && p.endsWith("**")) {
+                  return <strong key={pIdx} className="font-bold text-[#0F172A]">{p.slice(2, -2)}</strong>;
+                }
+                return p;
+              })}
+            </p>
+          );
+        }
+        return <p key={idx} className="leading-relaxed text-[#334155]">{line}</p>;
+      })}
+    </div>
+  );
+}
+
 export default function DynamicReviewWorkspace({
   apiUrl,
   meetingId,
@@ -313,9 +347,9 @@ export default function DynamicReviewWorkspace({
             <div className="space-y-3 flex flex-col justify-between">
               <div className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3.5 space-y-2 flex-1">
                 <span className="text-[9px] uppercase tracking-wider font-bold text-[#64748B] block">Generic Conversation Summary</span>
-                <p className="mt-1 text-[11px] leading-relaxed text-[#334155]">
-                  {conversationIntelligence.generic_summary || effectiveExecutiveSummary || "Summary not available for this session."}
-                </p>
+                <div className="mt-1 text-[11px] leading-relaxed text-[#334155]">
+                  {renderFormattedSummary(conversationIntelligence.generic_summary || effectiveExecutiveSummary)}
+                </div>
                 {Array.isArray(conversationIntelligence.signals?.problems_questions) && conversationIntelligence.signals.problems_questions.length > 0 && (
                   <div className="mt-3 pt-2.5 border-t border-[#E2E8F0]">
                     <span className="text-[8px] uppercase tracking-wider font-bold text-[#64748B] block">Questions / Queries Raised</span>
@@ -396,7 +430,7 @@ export default function DynamicReviewWorkspace({
           {stats.populated === 0 && (
             <div className="mt-2.5 rounded-md bg-[#F8FAFC] border border-[#E2E8F0] p-2 text-[9px] text-[#64748B] flex items-center gap-1.5">
               <Info size={12} className="text-[#0284C7] shrink-0" />
-              <span>0 qualification values found — expected for technical or educational calls.</span>
+              <span>0 qualification values found — expected for early outreach, cold prospecting, or non-sales calls.</span>
             </div>
           )}
         </div>
@@ -449,7 +483,15 @@ export default function DynamicReviewWorkspace({
             <Info size={15} className="text-[#0284C7] shrink-0 mt-0.5" />
             <div className="text-[10px] leading-relaxed text-[#334155]">
               <span className="font-bold text-[#0F172A]">No {profile?.name || "framework"} fields found in this transcript. </span>
-              Because this conversation is classified as {conversationIntelligence?.conversation_type || "non-sales"} ({conversationIntelligence?.sales_relevance || "Low Sales Relevance"}), PulseSync intentionally did not force data into extraction fields. All {stats.total} configured fields are accurately marked as <strong>Not mentioned</strong>.
+              {conversationIntelligence?.sales_relevance === 'Relevant' ? (
+                <>
+                  This conversation is classified as {conversationIntelligence?.conversation_type || "sales outreach"} ({conversationIntelligence?.sales_relevance}). Because this is an early exploratory conversation, formal qualification parameters were not discussed. All {stats.total} configured fields are accurately marked as <strong>Not mentioned</strong>.
+                </>
+              ) : (
+                <>
+                  Because this conversation is classified as {conversationIntelligence?.conversation_type || "non-sales"} ({conversationIntelligence?.sales_relevance || "Low Sales Relevance"}), PulseSync intentionally did not force data into extraction fields. All {stats.total} configured fields are accurately marked as <strong>Not mentioned</strong>.
+                </>
+              )}
             </div>
           </div>
         )}

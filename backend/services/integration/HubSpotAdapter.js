@@ -234,36 +234,61 @@ export class HubSpotAdapter extends BaseCrmAdapter {
   }
 
   async searchCompany(accessToken, query = {}) {
-    const filters = [];
+    // 1. Try search by domain first if provided
     if (query.domain) {
-      filters.push({ propertyName: 'domain', operator: 'EQ', value: query.domain.toLowerCase() });
-    } else if (query.name) {
-      filters.push({ propertyName: 'name', operator: 'CONTAINS_TOKEN', value: query.name });
+      try {
+        const filters = [{ propertyName: 'domain', operator: 'EQ', value: query.domain.toLowerCase() }];
+        const body = {
+          filterGroups: [{ filters }],
+          properties: ['name', 'domain', 'industry', 'city', 'country', 'phone', 'annualrevenue'],
+          limit: 10
+        };
+        const data = await this._request('/crm/v3/objects/companies/search', {
+          method: 'POST',
+          body: JSON.stringify(body)
+        }, accessToken);
+        if (data && Array.isArray(data.results) && data.results.length > 0) {
+          return data.results.map(r => ({
+            id: r.id,
+            name: r.properties.name || query.name || 'Unnamed Company',
+            domain: r.properties.domain || '',
+            properties: r.properties,
+            url: this._buildUrl('company', r.id)
+          }));
+        }
+      } catch (err) {
+        console.warn('[HubSpotAdapter] searchCompany by domain error:', err.message);
+      }
     }
 
-    const body = {
-      filterGroups: filters.length > 0 ? [{ filters }] : [],
-      properties: ['name', 'domain', 'industry', 'city', 'country', 'phone', 'annualrevenue'],
-      limit: 10
-    };
-
-    try {
-      const data = await this._request('/crm/v3/objects/companies/search', {
-        method: 'POST',
-        body: JSON.stringify(body)
-      }, accessToken);
-
-      return (data.results || []).map(r => ({
-        id: r.id,
-        name: r.properties.name || query.name || 'Unnamed Company',
-        domain: r.properties.domain || '',
-        properties: r.properties,
-        url: this._buildUrl('company', r.id)
-      }));
-    } catch (err) {
-      console.warn('[HubSpotAdapter] searchCompany error:', err.message);
-      return [];
+    // 2. If no domain match or no domain provided, fallback to search by name
+    if (query.name && query.name !== 'Acme' && query.name !== 'Untitled') {
+      try {
+        const filters = [{ propertyName: 'name', operator: 'CONTAINS_TOKEN', value: query.name }];
+        const body = {
+          filterGroups: [{ filters }],
+          properties: ['name', 'domain', 'industry', 'city', 'country', 'phone', 'annualrevenue'],
+          limit: 10
+        };
+        const data = await this._request('/crm/v3/objects/companies/search', {
+          method: 'POST',
+          body: JSON.stringify(body)
+        }, accessToken);
+        if (data && Array.isArray(data.results) && data.results.length > 0) {
+          return data.results.map(r => ({
+            id: r.id,
+            name: r.properties.name || query.name || 'Unnamed Company',
+            domain: r.properties.domain || '',
+            properties: r.properties,
+            url: this._buildUrl('company', r.id)
+          }));
+        }
+      } catch (err) {
+        console.warn('[HubSpotAdapter] searchCompany by name error:', err.message);
+      }
     }
+
+    return [];
   }
 
   async createCompany(accessToken, properties = {}) {

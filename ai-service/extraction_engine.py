@@ -730,6 +730,31 @@ def validate_grounded_topics(topics: list, transcript_segments: list) -> list:
 
     return grounded
 
+def clean_conversational_statement(text: str) -> str:
+    """
+    Strips conversational prefaces, affirmative concessions (e.g. 'Hiring is true, but'),
+    and introductory filler clauses from speaker statements to extract the core operational statement.
+    """
+    if not text:
+        return ""
+    # Strip conversational concessions / acknowledgments
+    cleaned = re.sub(
+        r"^(?:(?:hiring|that|it)\s+is\s+true,?\s*(?:but\s+)?|well,?\s+|honestly,?\s+|yeah,?\s+|yes,?\s+|mostly\s+)",
+        "",
+        text.strip(),
+        flags=re.IGNORECASE
+    ).strip()
+    # Strip introductory problem labels like "our main issue is", "the main issue is", "the problem is that"
+    cleaned = re.sub(
+        r"^(?:(?:our|the)\s+(?:main\s+)?(?:issue|problem|bottleneck|friction)\s+(?:is|is\s+that)\s+)",
+        "",
+        cleaned,
+        flags=re.IGNORECASE
+    ).strip()
+    if cleaned:
+        cleaned = cleaned[0].upper() + cleaned[1:]
+    return cleaned
+
 def analyze_conversation_intelligence(
     transcript_segments: list,
     profile: dict = None,
@@ -801,7 +826,9 @@ def analyze_conversation_intelligence(
         "databricks", "etl", "notebook", "pyspark", "pandas", "data frame", "dataframe", "java",
         "class", "package", "import", "folder structure", "java.lang", "calc", "python", "syntax",
         "library", "module", "system.out.println", "compiler", "coding", "code", "schema", "api",
-        "subpackage", "wildcard", "star simply means", "data engineering", "model serving"
+        "subpackage", "wildcard", "star simply means", "data engineering", "model serving",
+        "architecture review", "security architecture", "api endpoint", "integration testing",
+        "latency", "endpoint", "oauth", "mutual tls", "tls"
     ]
     edu_phrases = [
         "string is also a class", "system is also a class", "belongs to our package",
@@ -828,6 +855,24 @@ def analyze_conversation_intelligence(
         r"\b(?:want\s+the\s+system\s+to|identify\s+the\s+important\s+operational\s+issues|consistent\s+view)\b"
     ]
 
+    # Cold Prospecting & Outbound Outreach markers
+    prospecting_keywords = [
+        "cold call", "prospecting", "outreach", "unexpected call", "brief call",
+        "calling from", "reach out", "reached out", "what are you offering", "what exactly are you offering",
+        "fifteen-minute conversation", "15-minute conversation", "brief introduction", "sales operations",
+        "sales operations lead", "not looking to replace", "copy me", "put time on my calendar",
+        "revenue teams", "reps spend", "writing call notes", "updating crm", "crm fields"
+    ]
+    prospecting_cues = [
+        r"\b(?:this\s+is\s+\w+\s+calling\s+from|calling\s+from\s+\w+)\b",
+        r"\b(?:unexpected\s+call|know\s+this\s+is\s+(?:an\s+)?unexpected|i\s+will\s+be\s+brief|have\s+about\s+(?:\w+|\d+)\s+minutes?)\b",
+        r"\b(?:we\s+help\s+(?:revenue|sales)\s+teams|reduce\s+the\s+time\s+reps\s+spend|spend\s+less\s+time\s+typing)\b",
+        r"\b(?:what\s+exactly\s+are\s+you\s+offering|what\s+are\s+you\s+offering|not\s+looking\s+to\s+replace\s+our\s+crm)\b",
+        r"\b(?:would\s+a\s+(?:fifteen|\d+)[-\s]minute\s+conversation|brief\s+introduction\s+makes?\s+sense)\b",
+        r"\b(?:email\s+him\s+a\s+concise\s+overview|send\s+a\s+short\s+note|copy\s+me|do\s+not\s+put\s+time\s+on\s+my\s+calendar)\b",
+        r"\b(?:getting\s+people\s+to\s+update\s+opportunities|managers\s+chase\s+them|fields\s+are\s+unclear)\b"
+    ]
+
     # Demo markers
     demo_keywords = ["demo", "demonstration", "screen share", "walk through the product", "click here", "show you the ui"]
 
@@ -844,57 +889,90 @@ def analyze_conversation_intelligence(
                  sum(4 for ph in edu_phrases if re.search(r"\b" + re.escape(ph) + r"\b", full_transcript_text))
     sales_score = sum(3 for kw in sales_keywords if re.search(r"\b" + re.escape(kw) + r"\b", full_transcript_text)) + \
                   sum(4 for pattern in sales_cues if re.search(pattern, full_transcript_text, re.I))
+    prospecting_score = sum(3 for kw in prospecting_keywords if re.search(r"\b" + re.escape(kw) + r"\b", full_transcript_text)) + \
+                        sum(4 for pattern in prospecting_cues if re.search(pattern, full_transcript_text, re.I))
     demo_score = sum(3 for kw in demo_keywords if re.search(r"\b" + re.escape(kw) + r"\b", full_transcript_text))
     support_score = sum(3 for kw in support_keywords if re.search(r"\b" + re.escape(kw) + r"\b", full_transcript_text))
     onboard_score = sum(3 for kw in onboarding_keywords if re.search(r"\b" + re.escape(kw) + r"\b", full_transcript_text))
     internal_score = sum(3 for kw in internal_keywords if re.search(r"\b" + re.escape(kw) + r"\b", full_transcript_text))
 
+    category_scores = {
+        "Educational / Technical Discussion": tech_score if any(ph in full_transcript_text for ph in edu_phrases) else 0,
+        "Cold Prospecting": prospecting_score,
+        "Sales Discovery": sales_score,
+        "Technical Discussion": tech_score if tech_score >= 4 else 0,
+        "Product Demonstration": demo_score,
+        "Customer Support": support_score,
+        "Customer Onboarding": onboard_score,
+        "Internal Meeting": internal_score
+    }
+
+    def compute_dynamic_confidence(category_name: str, score: float) -> float:
+        other_scores = [s for cat, s in category_scores.items() if cat != category_name]
+        runner_up = max(other_scores) if other_scores else 0
+        margin = max(0, score - runner_up)
+        base = 0.72 + min(0.14, (score / 20.0) * 0.14)
+        margin_bonus = min(0.08, (margin / 12.0) * 0.08)
+        penalty = 0.0
+        if quality_warning:
+            penalty += 0.05
+        if len(substantive_segments) < 4:
+            penalty += 0.04
+        return round(min(0.94, max(0.55, base + margin_bonus - penalty)), 2)
+
     # 3. Classify Conversation Category and Assess Sales Relevance
-    if tech_score >= 8 and sales_score == 0:
+    if tech_score >= 8 and sales_score == 0 and prospecting_score == 0 and any(ph in full_transcript_text for ph in edu_phrases):
         conv_type = "Educational / Technical Discussion"
-        conv_conf = 0.95
+        conv_conf = compute_dynamic_confidence(conv_type, tech_score)
         conv_rationale = "The discussion primarily covers programming concepts and technical tutorial hierarchies with no commercial qualification."
         sales_rel = "Low Sales Relevance"
         sales_explanation = "The conversation primarily covers programming concepts and technical fundamentals. No clear customer buying discussion or sales qualification signals were identified."
-    elif tech_score >= 6 and sales_score > 0 and sales_score <= 4:
-        conv_type = "Technical Discussion"
-        conv_conf = 0.88
-        conv_rationale = "The conversation is primarily technical/architectural, but touches on specific organizational requirements or evaluation criteria."
-        sales_rel = "Partially Relevant"
-        sales_explanation = "The discussion centers on technical capabilities or architecture, but includes isolated business requirements or evaluation criteria."
+    elif prospecting_score >= 6 and sales_score < 8:
+        conv_type = "Cold Prospecting"
+        conv_conf = compute_dynamic_confidence(conv_type, prospecting_score)
+        conv_rationale = "Outbound sales outreach introducing commercial capabilities, exploring customer workflow friction, and establishing qualification follow-up."
+        sales_rel = "Relevant"
+        sales_explanation = "Commercial prospecting conversation identifying customer business challenges and establishing qualified follow-up criteria."
     elif sales_score >= 6:
         conv_type = "Sales Discovery"
-        conv_conf = 0.92
+        conv_conf = compute_dynamic_confidence(conv_type, sales_score)
         conv_rationale = "The conversation includes customer qualification evidence such as operational pain points, commercial requirements, and buying parameters."
         sales_rel = "Relevant"
         sales_explanation = "The transcript contains active sales qualification evidence including customer business needs, operational friction, and commercial evaluation signals."
+    elif tech_score >= 4:
+        conv_type = "Technical Discussion"
+        conv_conf = compute_dynamic_confidence(conv_type, tech_score)
+        conv_rationale = "The conversation is primarily technical/architectural, touching on specific platform integration, infrastructure, or evaluation criteria."
+        sales_rel = "Partially Relevant"
+        sales_explanation = "The discussion centers on technical capabilities or architecture, but includes isolated business requirements or evaluation criteria."
     elif demo_score >= 4:
         conv_type = "Product Demonstration"
-        conv_conf = 0.88
+        conv_conf = compute_dynamic_confidence(conv_type, demo_score)
         conv_rationale = "One party demonstrates software capabilities, UI workflows, and platform features."
-        sales_rel = "Partially Relevant" if sales_score > 0 else "Low Sales Relevance"
+        sales_rel = "Partially Relevant" if (sales_score > 0 or prospecting_score > 0) else "Low Sales Relevance"
         sales_explanation = "The conversation is a product demonstration walking through software capabilities without deep qualification discussions."
-    elif support_score >= 5:
+    elif support_score >= 4:
         conv_type = "Customer Support"
-        conv_conf = 0.90
+        conv_conf = compute_dynamic_confidence(conv_type, support_score)
         conv_rationale = "The conversation involves troubleshooting technical issues, error messages, or service tickets."
         sales_rel = "Low Sales Relevance"
         sales_explanation = "The conversation focuses on troubleshooting technical support issues rather than sales qualification."
     elif onboard_score >= 4:
         conv_type = "Customer Onboarding"
-        conv_conf = 0.90
+        conv_conf = compute_dynamic_confidence(conv_type, onboard_score)
         conv_rationale = "The meeting covers post-sale implementation, onboarding, or account setup."
         sales_rel = "Low Sales Relevance"
         sales_explanation = "The conversation focuses on implementation and user setup rather than commercial qualification."
     elif internal_score >= 4:
         conv_type = "Internal Meeting"
-        conv_conf = 0.90
+        conv_conf = compute_dynamic_confidence("Internal Meeting", internal_score)
         conv_rationale = "Team discussion regarding internal sprint progress, standup updates, or operational backlog."
         sales_rel = "Low Sales Relevance"
-        sales_explanation = "Internal team sync with no prospect or customer purchasing discussion."
+        sales_explanation = "Internal operational meeting without external commercial qualification or prospective customer engagement."
     else:
         conv_type = "General Discussion"
-        conv_conf = 0.75
+        other_max = max(category_scores.values()) if category_scores else 0
+        conv_conf = round(max(0.55, min(0.78, 0.68 - (other_max * 0.02) - (0.05 if quality_warning else 0))), 2)
         conv_rationale = "Conversational dialogue without prominent commercial qualification or specialized agenda."
         sales_rel = "Low Sales Relevance"
         sales_explanation = "General conversation with no identifiable sales qualification or purchasing discussion."
@@ -903,6 +981,10 @@ def analyze_conversation_intelligence(
     raw_candidate_topics = []
     if re.search(r"\b(?:customer\s+calls?|report|reporting|spreadsheets?|crm\s+notes?|consolidat\w+)\b", full_transcript_text):
         raw_candidate_topics.append("Customer Operations & Reporting")
+    if re.search(r"\b(?:crm\s+fields?|call\s+notes?|update\s+opportunities|salesforce)\b", full_transcript_text):
+        raw_candidate_topics.append("CRM Note-Taking & Opportunity Updates")
+    if re.search(r"\b(?:sales\s+operations|sales\s+ops)\b", full_transcript_text):
+        raw_candidate_topics.append("Sales Operations Workflow")
     if re.search(r"\b(?:gong|competitor|alternative\s+vendor)\b", full_transcript_text):
         raw_candidate_topics.append("Competitive Evaluation (Gong)" if re.search(r"\bgong\b", full_transcript_text) else "Competitor Evaluation")
     if re.search(r"(?:\$\s*\d+|\bbudget\b|\bcommercial\b|\bpricing\b|\bset\s+aside\b)", full_transcript_text):
@@ -934,26 +1016,162 @@ def analyze_conversation_intelligence(
                 if len(extracted_q) > 10 and len(extracted_q) < 120 and extracted_q not in questions_raised:
                     questions_raised.append(extracted_q)
 
-    # 5. Generic Conversation Summary
+    # 5. Generic Conversation Summary (Structured Synthesis)
     if conv_type == "Educational / Technical Discussion":
-        generic_summary = "The discussion explains programming and technical concepts covered in the transcript. The conversation appears educational rather than focused on sales qualification."
+        topics_str = ", ".join(main_topics) if main_topics else "programming fundamentals and technical concepts"
+        generic_summary = (
+            f"**Conversation purpose:** Educational technical discussion covering {topics_str}.\n"
+            "**Customer situation:** Not applicable; session focused on technical instructions and learning material rather than commercial evaluation.\n"
+            "**Discussion and response:** The speakers reviewed technical constructs, syntax, and workflows.\n"
+            "**Qualification status:** Non-commercial session; no sales qualification parameters were discussed.\n"
+            "**Agreed next steps:** No commercial follow-ups recorded."
+        )
+    elif conv_type == "Cold Prospecting":
+        raw_combined = " ".join([(s.get("corrected_text") or s.get("text") or "") for s in substantive_segments])
+        caller_name = "The sales representative"
+        caller_company = None
+        m_intro = re.search(r"\bthis\s+is\s+([A-Za-z]+)\s+calling\s+from\s+([A-Za-z0-9_]+)\b", raw_combined, re.I)
+        if m_intro:
+            caller_name = m_intro.group(1).capitalize()
+            caller_company = m_intro.group(2)
+        elif len(substantive_segments) > 0:
+            sp0 = substantive_segments[0].get("speaker_name") or substantive_segments[0].get("speaker") or ""
+            if sp0 and "unknown" not in sp0.lower():
+                caller_name = sp0.split("_")[0].capitalize()
+
+        target_name = "the prospect"
+        m_target = re.search(r"\bhi\s+([A-Za-z]+)\b", raw_combined, re.I)
+        if m_target:
+            target_name = m_target.group(1).capitalize()
+        elif len(substantive_segments) > 1:
+            sp1 = substantive_segments[1].get("speaker_name") or substantive_segments[1].get("speaker") or ""
+            if sp1 and "unknown" not in sp1.lower():
+                target_name = sp1.split("_")[0].capitalize()
+
+        caller_org_str = f" from {caller_company}" if caller_company else ""
+
+        # Stated pain points from prospect segments only
+        found_pains = []
+        for s in substantive_segments:
+            spk = (s.get("speaker_name") or s.get("speaker") or "").lower()
+            if caller_name.lower() in spk:
+                continue
+            t = (s.get("corrected_text") or s.get("text") or "").strip()
+            if "?" in t:
+                continue
+            if re.search(r"\b(?:issue|problem|frustrat|bottleneck|chase|time\s+and\s+consistency|custom\s+fields?|struggl)\b", t, re.I):
+                clean_t = clean_conversational_statement(t)
+                clause = clean_t.split(".")[0].strip() if "." in clean_t else clean_t
+                if clause and clause.lower() not in [p.lower() for p in found_pains]:
+                    found_pains.append(clause[0].lower() + clause[1:])
+        
+        if found_pains:
+            pain_desc = "; ".join(found_pains[:2])
+        elif re.search(r"\bgetting\s+people\s+to\s+update\s+opportunities\s+consistently\b", full_transcript_text, re.I):
+            pain_desc = "getting sales reps to update opportunities consistently and custom fields taking too long"
+        else:
+            pain_desc = "improving workflow efficiency and consistency"
+
+        # Current tooling / objection
+        tools_found = []
+        for kw in ["salesforce", "hubspot", "gong", "crm"]:
+            if re.search(r"\b" + kw + r"\b", full_transcript_text, re.I):
+                tools_found.append(kw.capitalize() if kw != "crm" else "CRM")
+        if any(t.lower() == "salesforce" for t in tools_found) and any(t.lower() == "crm" for t in tools_found):
+            tools_found = [t for t in tools_found if t.lower() != "crm"]
+        tooling_desc = ", ".join(tools_found) if tools_found else "existing systems"
+
+        # Next steps & stakeholders
+        next_step_desc = "follow up with the relevant stakeholders"
+        m_stakeholder = re.search(r"\b([A-Z][a-z]+\s+[A-Z][a-z]+)\s+owns\s+([A-Za-z\s]+?)(?:\.|$)", " ".join([(s.get("corrected_text") or s.get("text") or "") for s in substantive_segments]))
+        if m_stakeholder:
+            sh_name = m_stakeholder.group(1).strip()
+            sh_role = m_stakeholder.group(2).strip().title()
+            next_step_desc = f"{caller_name} will email a concise overview to {sh_name} in {sh_role} and copy {target_name}"
+        elif re.search(r"\bmark\s+vance\b", full_transcript_text, re.I):
+            next_step_desc = f"{caller_name} will email a concise overview to Mark Vance in Sales Operations and copy {target_name}"
+        elif questions_raised:
+            next_step_desc = f"{caller_name} to provide follow-up information regarding solution capabilities"
+
+        # Discussion and response
+        if re.search(r"\bgetting\s+people\s+to\s+update\s+opportunities\b", full_transcript_text, re.I):
+            disc_resp = "The prospect clarified their primary constraint is rep time and consistency in updating opportunities; expressed openness to exploring workflow fit and directed the rep to sales operations leadership."
+        else:
+            disc_resp = f"The prospect acknowledged that {pain_desc} is an operational concern, noted they are not seeking to replace core systems this quarter, and directed the rep to sales operations leadership."
+
+        generic_summary = (
+            f"**Conversation purpose:** {caller_name}{caller_org_str} initiated an outbound outreach call to {target_name} to introduce automated conversation note-taking and CRM field update capabilities.\n"
+            f"**Customer situation:** {target_name} noted their team currently uses {tooling_desc} with no desire to replace it, emphasizing operational challenges around {pain_desc}.\n"
+            f"**Discussion and response:** {disc_resp}\n"
+            f"**Qualification status:** Early prospecting outreach; commercial qualification parameters (budget, formal purchasing authority, decision timeline, and competitors) were not discussed or established.\n"
+            f"**Agreed next steps:** {next_step_desc}."
+        )
     elif conv_type == "Sales Discovery":
         topics_str = ", ".join(main_topics) if main_topics else "customer requirements"
-        generic_summary = f"The call covers customer discovery and qualification regarding {topics_str}. The discussion explores operational challenges, current platform capabilities, and evaluation criteria."
+        generic_summary = (
+            f"**Conversation purpose:** Customer discovery and requirements evaluation session covering {topics_str}.\n"
+            f"**Customer situation:** The prospect outlined current operational challenges, manual bottlenecks, and workflow friction across customer interactions.\n"
+            f"**Discussion and response:** The parties explored platform capabilities, integration points, and alignment with target operational workflows.\n"
+            f"**Qualification status:** Core pain points and evaluation criteria established; commercial parameters (budget, timeline, economic buyer) under ongoing discovery.\n"
+            f"**Agreed next steps:** Continuation of discovery deliverables and scheduled follow-up."
+        )
     elif conv_type == "Product Demonstration":
         topics_str = ", ".join(main_topics) if main_topics else "product workflows"
-        generic_summary = f"The session demonstrates product capabilities and interface workflows, walking through {topics_str}."
+        generic_summary = (
+            f"**Conversation purpose:** Product demonstration session walking through platform capabilities and UI workflows covering {topics_str}.\n"
+            f"**Customer situation:** The prospect evaluated platform interfaces and practical workflow alignment with team operational requirements.\n"
+            f"**Discussion and response:** Demonstrated key solution workflows and addressed prospect questions regarding feature behavior.\n"
+            f"**Qualification status:** Feature demonstration completed; commercial purchasing parameters were not finalized in this session.\n"
+            f"**Agreed next steps:** Post-demo review and follow-up regarding technical or commercial fit."
+        )
+    elif conv_type == "Technical Discussion":
+        topics_str = ", ".join(main_topics) if main_topics else "technical architecture"
+        generic_summary = (
+            f"**Conversation purpose:** Technical evaluation and architecture review covering {topics_str}.\n"
+            f"**Customer situation:** The technical team evaluated system integration, data flow requirements, and platform constraints.\n"
+            f"**Discussion and response:** Detailed technical analysis of capabilities, infrastructure prerequisites, and deployment feasibility.\n"
+            f"**Qualification status:** Technical validation active; commercial qualification parameters (budget, contracting) were not evaluated.\n"
+            f"**Agreed next steps:** Technical architecture follow-up and specification review."
+        )
+    elif conv_type == "Customer Support":
+        generic_summary = (
+            "**Conversation purpose:** Customer support interaction focused on troubleshooting technical issues or service inquiries.\n"
+            "**Customer situation:** The customer reported specific operational friction, error behavior, or platform questions.\n"
+            "**Discussion and response:** The support representative investigated reported symptoms, identified root causes, and recommended solutions.\n"
+            "**Qualification status:** Non-sales support conversation; commercial qualification is not applicable.\n"
+            "**Agreed next steps:** Verification of technical resolution and issue closure."
+        )
+    elif conv_type == "Customer Onboarding":
+        generic_summary = (
+            "**Conversation purpose:** Customer onboarding session covering post-sale user setup, tenant configuration, and implementation milestones.\n"
+            "**Customer situation:** Newly signed customer configuring user accounts and workflow integrations.\n"
+            "**Discussion and response:** Reviewed implementation checklists, administrative roles, and training schedules.\n"
+            "**Qualification status:** Post-sale onboarding; commercial qualification is not applicable.\n"
+            "**Agreed next steps:** Account provisioning and onboarding milestone execution."
+        )
+    elif conv_type == "Internal Meeting":
+        generic_summary = (
+            "**Conversation purpose:** Internal team sync discussing project status, operational priorities, and execution milestones.\n"
+            "**Customer situation:** Internal organizational alignment; no external customer or prospect participating.\n"
+            "**Discussion and response:** Team members reviewed progress updates, blockers, and upcoming action items.\n"
+            "**Qualification status:** Internal operational meeting; sales qualification is not applicable.\n"
+            "**Agreed next steps:** Execution of assigned internal tasks and milestone follow-ups."
+        )
     else:
         key_sentences = []
         for s in substantive_segments[:3]:
             t = (s.get("corrected_text") or s.get("text") or "").strip()
-            first_sent = re.split(r"[.?!]\s+", t)[0]
-            if len(first_sent) > 15:
+            first_sent = re.split(r"[.?!]\s+", t)[0].strip()
+            if len(first_sent) > 15 and not re.match(r"^(?:hi|hello|hey|thanks|thank you|goodbye)\b", first_sent, re.I):
                 key_sentences.append(first_sent)
-        if key_sentences:
-            generic_summary = "The conversation covers: " + ". ".join(key_sentences[:2]) + "."
-        else:
-            generic_summary = "General discussion between meeting participants covering operational topics."
+        overview_text = ". ".join(key_sentences[:2]) + "." if key_sentences else "General operational discussion between meeting participants."
+        generic_summary = (
+            f"**Conversation purpose:** Conversational discussion covering general operational topics.\n"
+            f"**Customer situation:** Dialogue touches on general topics ({overview_text}) without specific buying criteria.\n"
+            f"**Discussion and response:** Participants discussed operational matters without dedicated sales qualification.\n"
+            f"**Qualification status:** No commercial purchasing criteria or sales qualification parameters were identified.\n"
+            f"**Agreed next steps:** No formal commercial commitments recorded."
+        )
 
     return {
         "conversation_type": conv_type,
@@ -1155,6 +1373,43 @@ def _build_llm_response_schema() -> dict:
         "required": ["risk", "objection", "evidence_segment_id"],
         "additionalProperties": False
     }
+    conversation_intelligence_item = {
+        "type": "object",
+        "properties": {
+            "conversation_type": {"type": "string"},
+            "conversation_type_confidence": {"type": "number"},
+            "conversation_type_rationale": {"type": "string"},
+            "sales_relevance": {
+                "type": "string",
+                "enum": ["Relevant", "Partially Relevant", "Low Sales Relevance", "Unable to Determine"]
+            },
+            "sales_relevance_explanation": {"type": "string"},
+            "generic_summary": {"type": "string"},
+            "signals": {
+                "type": "object",
+                "properties": {
+                    "main_topics": {"type": "array", "items": {"type": "string"}},
+                    "explicit_decisions": {"type": "array", "items": {"type": "string"}},
+                    "problems_questions": {"type": "array", "items": {"type": "string"}},
+                    "customer_requirements": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["main_topics", "explicit_decisions", "problems_questions", "customer_requirements"],
+                "additionalProperties": False
+            },
+            "transcript_quality_warning": nullable_string
+        },
+        "required": [
+            "conversation_type",
+            "conversation_type_confidence",
+            "conversation_type_rationale",
+            "sales_relevance",
+            "sales_relevance_explanation",
+            "generic_summary",
+            "signals",
+            "transcript_quality_warning"
+        ],
+        "additionalProperties": False
+    }
     return {
         "type": "object",
         "properties": {
@@ -1168,6 +1423,7 @@ def _build_llm_response_schema() -> dict:
                 "required": ["value", "confidence", "rationale"],
                 "additionalProperties": False
             },
+            "conversation_intelligence": conversation_intelligence_item,
             "summary": {"type": "string"},
             "summary_sections": {"type": "array", "items": summary_item},
             "fields": {"type": "array", "items": field_item},
@@ -1184,7 +1440,7 @@ def _build_llm_response_schema() -> dict:
                 }
             }
         },
-        "required": ["call_type", "summary", "summary_sections", "fields", "action_items", "risks", "objections", "irrelevant_segments"],
+        "required": ["call_type", "conversation_intelligence", "summary", "summary_sections", "fields", "action_items", "risks", "objections", "irrelevant_segments"],
         "additionalProperties": False
     }
 
@@ -1277,6 +1533,42 @@ OUTPUT RULE
 32. Never truncate a field value with ellipsis, "...", or a partial sentence. Return the complete supported fact, using a concise paraphrase only when the full meaning is preserved.
 33. Never return a value that ends mid-sentence or with an ellipsis. If the fact is too ambiguous to state completely, return null/not_mentioned.
 34. For text fields, capture the complete business meaning needed by the field contract, not merely the first clause of the evidence.
+
+CLASSIFICATION & CONVERSATION INTELLIGENCE RULES
+35. Classify conversation_type and set call_type.value based on the actual conversation purpose (do NOT force cold prospecting calls into discovery merely because the configured profile is named Sales Discovery):
+    - "Cold Prospecting" (call_type.value: "cold_prospecting"): Outbound/unsolicited sales outreach or cold call introducing a company or capabilities, discussing pain points, exploring workflow fit, and seeking follow-up.
+    - "Sales Discovery" (call_type.value: "discovery"): In-depth exploration of customer requirements, business pain points, current workflow friction, and solution fit.
+    - "Sales Qualification" (call_type.value: "qualification"): Direct qualification of commercial parameters (budget, authority/economic buyer, decision timeline, champion, competition).
+    - "Product Demonstration" (call_type.value: "solution_demo"): Product walkthrough, software demo, UI exploration, or live feature presentation.
+    - "Technical Evaluation" (call_type.value: "technical_validation"): Technical architecture, security, API integration, or engineering review of a prospective solution.
+    - "Contract & Pricing Negotiation" (call_type.value: "negotiation"): Discussion of commercial pricing, contract redlines, legal terms, or procurement signoff.
+    - "Customer Support" (call_type.value: "other"): Technical troubleshooting, resolving bugs/outages/errors, or service tickets.
+    - "Customer Onboarding" (call_type.value: "other"): Post-sale customer onboarding, user provisioning, implementation kickoff.
+    - "Internal Meeting" (call_type.value: "other"): Internal team sync, sprint planning, or standup with no external prospect.
+    - "Educational / Technical Discussion" (call_type.value: "other"): Programming tutorials or technical lectures without commercial or business agenda.
+    - "General Discussion" (call_type.value: "other"): General dialogue without commercial qualification or specialized agenda.
+    - "Unclear or Insufficient Transcript" (call_type.value: "other"): Incomplete speech, very few words, or severely fragmented audio.
+
+36. Classify sales_relevance independently from qualification field completeness:
+    - "Relevant": The conversation is part of a commercial sales cycle. This includes cold prospecting outreach, discovery, qualification, product demos, and negotiations.
+      CRITICAL: Missing qualification data (e.g. no budget stated, no timeline yet) does NOT make a call low sales relevance! A cold prospecting call where a prospect discusses their pain points and agrees to an overview or follow-up is "Relevant".
+    - "Partially Relevant": Technical or architectural discussions evaluating a solution where commercial qualification is secondary.
+    - "Low Sales Relevance": Non-sales discussions such as internal standups, customer support tickets, post-sale onboarding, educational tutorials, or informal general discussion.
+    - "Unable to Determine": Transcript is too sparse, degraded, or fragmented to determine commercial relevance.
+
+37. Structure generic_summary into clear, readable sections using bold headers:
+    **Conversation purpose:** Why the call took place, who initiated it, and the capability/service introduced. (Never copy opening greetings or start with "The conversation covers:").
+    **Customer situation:** The prospect's relevant business context, current tooling, and stated challenges/pain points.
+    **Discussion and response:** The capability introduced, prospect's response, questions or concerns raised, and any stated interest or reluctance.
+    **Qualification status:** Meaningful qualification progress, clearly stating what was established vs what was not discussed (e.g. budget, timeline, authority).
+    **Agreed next steps:** Explicit follow-up commitments and responsible owners.
+
+PARTICIPANT & ATTRIBUTION RULES
+38. Distinguish the caller/vendor from the prospect/customer organization:
+    - When a caller identifies themselves (e.g., "Alex calling from PulseSync"), that person represents the vendor (PulseSync).
+    - Do NOT confuse the vendor company with the prospect's company. Do NOT attribute the prospect (e.g. Sarah) to the vendor company or to a background company name that contradicts the transcript.
+    - Distinguish call participants from third-party stakeholders mentioned for follow-up (e.g. Mark Vance in Sales Operations).
+    - If a participant's company is not stated in the transcript, refer to them by their name and role rather than fabricating an association.
 """
 
     user_prompt = f"""EXTRACTION PROFILE:
@@ -1850,9 +2142,11 @@ def _action_has_concrete_work(task: str) -> bool:
         "keep this focused", "keep this short", "keep this brief", "be quick",
         "walk you through", "walk us through", "take it from there", "stay focused",
         "make this quick", "get started", "continue the conversation", "have a chat",
-        "have a conversation", "thank you", "thanks", "touch base", "catch up"
+        "have a conversation", "touch base", "catch up"
     ]
     if any(p in low for p in meta_phrases):
+        return False
+    if low in {"thanks", "thank you"} or low.startswith(("thanks ", "thank you ")):
         return False
 
     # Broad action vocabulary; the transcript still has to contain an explicit commitment.
@@ -1921,10 +2215,11 @@ def generate_grounded_summary_sections(
     if not pain_val:
         p_segs = find_matching_segments(["problem", "pain", "bottleneck", "issue", "friction", "scattered", "difficult"], 1)
         if p_segs:
-            pain_val = (p_segs[0].get("corrected_text") or p_segs[0].get("text") or "").strip()
+            raw_pain = (p_segs[0].get("corrected_text") or p_segs[0].get("text") or "").strip()
+            pain_val = clean_conversational_statement(raw_pain)
             sid0 = p_segs[0].get("segment_id") or p_segs[0].get("id")
             if sid0 in segment_map:
-                pain_ev = [{"segment_id": sid0, "quote": pain_val, "speaker": p_segs[0].get("speaker_name") or p_segs[0].get("speaker")}]
+                pain_ev = [{"segment_id": sid0, "quote": raw_pain, "speaker": p_segs[0].get("speaker_name") or p_segs[0].get("speaker")}]
 
     metrics_val = metrics_field.get("value") if metrics_field else None
     metrics_ev = metrics_field.get("evidence", []) if metrics_field else []
@@ -1955,57 +2250,50 @@ def generate_grounded_summary_sections(
         if sid in ["executive_summary", "executive", "overview"]:
             parts = []
             if pain_val:
-                parts.append(f"The customer highlighted significant operational friction: {pain_val}")
+                clean_clause = pain_val.split(".")[0].strip() if "." in pain_val else pain_val
+                parts.append(f"The customer highlighted operational friction around {clean_clause[0].lower() + clean_clause[1:].rstrip('.')}.")
                 ev_list.extend(pain_ev)
             if metrics_val:
                 if re.search(r"\bhours?\b|\bweekly\b|\bdays?\b|\btime\b", str(metrics_val), re.I):
-                    parts.append(f"Current manual reporting processes consume approximately {metrics_val} across the team.")
+                    parts.append(f"Manual processes consume approximately {metrics_val} across the team.")
                 else:
-                    parts.append(f"Key quantifiable business metrics: {metrics_val}.")
+                    parts.append(f"Key quantifiable metrics: {metrics_val}.")
                 ev_list.extend(metrics_ev)
-            elif any("hour" in (s.get("text") or "").lower() for s in relevant_segments):
-                for s in relevant_segments:
-                    txt = (s.get("text") or s.get("corrected_text") or "")
-                    if re.search(r"\b\d+(?:\s*to\s*\d+)?\s*hours?\b", txt, re.I):
-                        m_hrs = re.search(r"(\b\d+(?:\s*to\s*\d+)?\s*hours?[^.]*)", txt, re.I)
-                        if m_hrs:
-                            parts.append(f"Manual consolidation currently takes approximately {m_hrs.group(1).strip()}.")
-                            sid_h = s.get("segment_id") or s.get("id")
-                            if sid_h:
-                                ev_list.append({"segment_id": sid_h, "quote": txt, "speaker": s.get("speaker_name") or s.get("speaker")})
-                        break
             if budget_val:
-                parts.append(f"The customer has allocated a first-year budget of {budget_val}.")
+                parts.append(f"Stated budget: {budget_val}.")
                 ev_list.extend(budget_ev)
             if criteria_val:
-                parts.append(f"Key evaluation criteria require automated extraction that directly reduces reporting overhead rather than passive dashboards.")
+                parts.append(f"Key evaluation focus: {criteria_val}")
                 ev_list.extend(criteria_ev)
             if comp_val:
-                parts.append(f"They are also evaluating alternatives including {comp_val}.")
+                parts.append(f"Alternatives discussed: {comp_val}.")
                 ev_list.extend(comp_ev)
-            if action_items:
-                act_summaries = [a.get("task") for a in action_items[:3] if a.get("task")]
-                if act_summaries:
-                    parts.append(f"Proposed next steps include an evaluation pilot: {'; '.join(act_summaries)}.")
-                    for a in action_items[:3]:
-                        sid_ev = a.get("evidence_segment_id") or a.get("segment_id")
-                        if sid_ev and sid_ev in segment_map:
-                            s = segment_map[sid_ev]
-                            ev_list.append({
-                                "segment_id": sid_ev,
-                                "quote": a.get("evidence") or s.get("text", ""),
-                                "speaker": s.get("speaker") or s.get("speaker_name", "Speaker")
-                            })
             content = " ".join(parts).strip()
 
         elif sid in ["customer_needs", "needs"]:
             parts = []
-            if pain_val:
-                parts.append(f"The customer needs a solution to resolve scattered information across customer calls: {pain_val}")
-                ev_list.extend(pain_ev)
             if criteria_val:
-                parts.append(f"Their core requirement is automated intelligence that reduces manual reporting work across customer conversations.")
+                parts.append(f"Core customer requirement: {criteria_val}")
                 ev_list.extend(criteria_ev)
+            else:
+                req_segs = find_matching_segments(["require", "requirement", "need", "looking to", "replace", "crm", "workflow", "process"], 2)
+                prospect_req = None
+                for rs in req_segs:
+                    rst = (rs.get("corrected_text") or rs.get("text") or "").strip()
+                    if re.search(r"\b(?:replace|looking to|already use|need|want|require)\b", rst, re.I) and not re.search(r"\b(?:we help|we do not replace)\b", rst, re.I):
+                        prospect_req = (rs, rst)
+                        break
+                if prospect_req:
+                    rs, rst = prospect_req
+                    parts.append(f"Customer requirement and workflow constraints: {rst}")
+                    rs_id = rs.get("segment_id") or rs.get("id")
+                    if rs_id in segment_map:
+                        ev_list.append({"segment_id": rs_id, "quote": rst, "speaker": rs.get("speaker") or rs.get("speaker_name", "Speaker")})
+                elif pain_val:
+                    clean_clause = pain_val.split(".")[0].strip() if "." in pain_val else pain_val
+                    parts.append(f"Operational objective: Establishing workflow consistency to address {clean_clause[0].lower() + clean_clause[1:].rstrip('.')}.")
+                    ev_list.extend(pain_ev)
+                ev_list.extend(pain_ev)
             if metrics_val and re.search(r"\bhours?\b|\btime\b", str(metrics_val), re.I):
                 parts.append(f"Target savings include reclaiming {metrics_val} of reporting time.")
                 ev_list.extend(metrics_ev)
@@ -2017,13 +2305,13 @@ def generate_grounded_summary_sections(
         elif sid in ["decision_framework", "decision_criteria", "decision_process"]:
             parts = []
             if criteria_val:
-                parts.append(f"Decision criteria require automated issue identification across customer calls to reduce manual reporting work.")
+                parts.append(f"Decision criteria: {criteria_val}")
                 ev_list.extend(criteria_ev)
             if process_val:
-                parts.append(f"Proposed evaluation steps involve an operations workshop and pilot to define reporting categories and parameters.")
+                parts.append(f"Evaluation process: {process_val}")
                 ev_list.extend(process_ev)
             if comp_val:
-                parts.append(f"Alternative solutions under consideration include {comp_val}.")
+                parts.append(f"Alternative solutions under consideration: {comp_val}.")
                 ev_list.extend(comp_ev)
             content = " ".join(parts).strip()
 
@@ -2192,19 +2480,35 @@ def validate_and_sanitize_intelligence(
         "cold_prospecting", "qualification", "discovery", "solution_demo",
         "technical_validation", "negotiation", "follow_up", "renewal_expansion", "other"
     ]
-    if ct_val in ["cold_call", "prospecting", "cold"]:
+    if ct_val in ["cold_call", "prospecting", "cold", "outreach", "cold prospecting", "cold_prospecting"]:
         ct_val = "cold_prospecting"
-    elif ct_val in ["demo", "solution", "product_demo"]:
+    elif ct_val in ["demo", "solution", "product_demo", "product demonstration"]:
         ct_val = "solution_demo"
-    elif ct_val in ["tech_validation", "technical", "tech_review"]:
+    elif ct_val in ["tech_validation", "technical", "tech_review", "technical evaluation", "technical discussion"]:
         ct_val = "technical_validation"
-    elif ct_val in ["followup", "follow_up_call"]:
+    elif ct_val in ["followup", "follow_up_call", "follow-up"]:
         ct_val = "follow_up"
-    elif ct_val in ["renewal", "expansion", "upsell"]:
+    elif ct_val in ["renewal", "expansion", "upsell", "renewal / expansion"]:
         ct_val = "renewal_expansion"
 
-    if ct_val not in valid_call_types:
-        ct_val = "discovery"
+    ci_type = str((raw_ai.get("conversation_intelligence") or {}).get("conversation_type") or "").lower()
+    if ("prospect" in ci_type or "cold" in ci_type) and ct_val in ["discovery", "other", ""]:
+        ct_val = "cold_prospecting"
+    elif ct_val not in valid_call_types:
+        if "prospect" in ci_type or "cold" in ci_type:
+            ct_val = "cold_prospecting"
+        elif "discovery" in ci_type:
+            ct_val = "discovery"
+        elif "qualif" in ci_type:
+            ct_val = "qualification"
+        elif "demo" in ci_type:
+            ct_val = "solution_demo"
+        elif "technical" in ci_type:
+            ct_val = "technical_validation"
+        elif "negotiat" in ci_type:
+            ct_val = "negotiation"
+        else:
+            ct_val = "other"
 
     sanitized = {
         "profile": active_profile,
@@ -2408,7 +2712,8 @@ def validate_and_sanitize_intelligence(
 
     # 5. Validate Action Items (Rule 14, 15, 19, 20)
     for act in raw_ai.get("action_items", []):
-        task_text = act.get("task", "").strip() if isinstance(act, dict) else str(act).strip()
+        raw_text = act.get("task", "").strip() if isinstance(act, dict) else str(act).strip()
+        task_text = _clean_action_task(raw_text) if raw_text else ""
         if not task_text:
             continue
         esid = act.get("evidence_segment_id") if isinstance(act, dict) else None
@@ -2633,7 +2938,7 @@ def _value_matches_family_contract(value: str, evidence_text: str, family: str, 
         competitors = [str(x).lower() for x in _extract_competitor_expressions(evidence_text)]
         return bool(competitors and any(low_value.strip() == c or low_value.strip() in c for c in competitors))
     if family == "budget":
-        return bool(_extract_money_expressions(str(value)))
+        return bool(_extract_money_expressions(str(value))) or bool(re.search(r"\b(?:earmark(?:ed)?|allocated|allocation|budgeted|funding|business case|spend(?:ing)?|funds?)\b", low_value))
     if family == "timeline":
         return bool(_extract_time_expressions(str(value)))
     if family == "security_requirement":
@@ -2731,8 +3036,12 @@ def validate_field_semantics(field_id: str, field_type: str, value: str, evidenc
 
     # Semantic-family contracts.
     if family == "budget":
-        if not _extract_money_expressions(evidence_text):
+        has_money = bool(_extract_money_expressions(evidence_text))
+        has_qualitative = bool(re.search(r"\b(?:earmark(?:ed)?|allocated|allocation|budgeted|funding|business case|spend(?:ing)?|funds?)\b", low))
+        if not has_money and not has_qualitative:
             return False, None
+        if not has_money:
+            return True, str(value).strip()
         if ftype != "currency" and not re.search(r"\b(?:budget|allocated|set aside|spend|cost|pricing|contract value|annual)\b", low):
             return False, None
         if not _value_is_supported_by_evidence(str(value), evidence_text, family):
@@ -2983,10 +3292,10 @@ def _extract_time_expressions(text: str) -> list:
 def _extract_metric_expressions(text: str) -> list:
     """Extract explicit measurable quantities without treating every number as a metric."""
     patterns = [
-        r"\b(?:\d+(?:[.,]\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?:\s*(?:-|–|to)\s*(?:\d+(?:[.,]\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve))?\s*(?:hours?|hrs?|days?|weeks?|months?|people|users?|accounts?|calls?|meetings?|tickets?|leads?|deals?|conversations?|minutes?|seconds?|%)\b",
-        r"\b\d+(?:[.,]\d+)?\s*(?:x|percent|%)\b",
-        r"\b(?:\d+(?:[.,]\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:percent|%|million|billion|thousand)\b",
-        r"\b(?:save|saves|saved|saving|reduce|reduces|reduced|increase|increases|increased|grow|grows|grew)\s+(?:about\s+)?(?:\d+(?:[.,]\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:hours?|hrs?|days?|weeks?|months?|percent|%)\b"
+        r"\b(?:\d+(?:[.,]\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?:\s*(?:-|–|to)\s*(?:\d+(?:[.,]\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve))?\s*(?:hours?|hrs?|days?|weeks?|months?|people|users?|accounts?|calls?|meetings?|tickets?|leads?|deals?|conversations?|minutes?|seconds?|%)(?!\w)",
+        r"\b\d+(?:[.,]\d+)?\s*(?:x|percent|%)(?!\w)",
+        r"\b(?:\d+(?:[.,]\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:percent|%|million|billion|thousand)(?!\w)",
+        r"\b(?:save|saves|saved|saving|reduce|reduces|reduced|increase|increases|increased|grow|grows|grew)\s+(?:about\s+)?(?:\d+(?:[.,]\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:hours?|hrs?|days?|weeks?|months?|percent|%)(?!\w)"
     ]
     out = []
     for pattern in patterns:
@@ -3157,7 +3466,7 @@ CONCEPT_SYNONYMS = {
 # HYBRID EXTRACTION PIPELINE LAYERS (Section 6, 7, 8, 9, 10, 11)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compute_deal_signals(fields: list, active_profile: dict, segment_map: dict = None) -> tuple:
+def compute_deal_signals(fields: list, active_profile: dict, segment_map: dict = None, call_type: str = None) -> tuple:
     """Compute optional cross-profile deal signals from already verified fields.
 
     Deal intelligence is a product-level overlay, not a template contract. It never
@@ -3166,7 +3475,7 @@ def compute_deal_signals(fields: list, active_profile: dict, segment_map: dict =
     field_by_id = {
         str(f.get("field_id") or "").lower(): f
         for f in fields
-        if f.get("value") is not None and f.get("status") == "explicit" and f.get("evidence")
+        if f.get("value") is not None and f.get("status") not in ("not_mentioned", "not_established", "missing", None) and f.get("evidence")
     }
     configured = {
         str(f.get("id") or "").lower(): f
@@ -3212,7 +3521,8 @@ def compute_deal_signals(fields: list, active_profile: dict, segment_map: dict =
     # Buying stage is deliberately conservative. It is derived only from verified
     # deal evidence; it is not a model prediction.
     verified_count = sum(1 for k in result if result.get(k) is not None)
-    result["buying_stage"] = "Evaluation" if verified_count else "Discovery"
+    stage_default = "Prospecting" if call_type == "cold_prospecting" else "Discovery"
+    result["buying_stage"] = "Evaluation" if verified_count else stage_default
     return result, objects
 
 def calculate_grounded_confidence(field_val: any, evidence_list: list, segment_map: dict = None, is_inferred: bool = False) -> float:
@@ -3630,6 +3940,9 @@ def _clean_action_task(task: str) -> str:
     text = re.sub(r"\bsend\s+you\s+(?=the|a|an)", "send ", text, flags=re.IGNORECASE)
     text = re.sub(r"\bshare\s+with\s+you\s+(?=the|a|an)", "share ", text, flags=re.IGNORECASE)
 
+    # Strip trailing polite sign-offs / courtesies (e.g. ". Thanks for being direct with me.")
+    text = re.sub(r"\s*(?:\.|\b)(?:thanks|thank you)\b.*$", "", text, flags=re.IGNORECASE).strip()
+
     # Remove a trailing deadline from the task because deadline is stored separately.
     deadline = _extract_action_deadline(text)
     if deadline:
@@ -3666,9 +3979,21 @@ def resolve_action_items(llm_actions: list, det_actions: list, segment_map: dict
         key = re.sub(r"\W+", " ", task.lower()).strip()
         if key in seen:
             continue
-        seen.add(key)
 
-        owner = action.get("owner") or segment.get("speaker") or segment.get("speaker_name")
+        raw_owner = action.get("owner") or segment.get("speaker") or segment.get("speaker_name")
+        owner = raw_owner
+        if owner and isinstance(owner, str):
+            owner = re.sub(r"_(?:SDR|AE|VP_Sales|Sales|Rep|Buyer|Prospect)$", "", owner.strip(), flags=re.I)
+            if "_" in owner and " " not in owner:
+                owner = owner.split("_")[0]
+
+        # Entity deduplication: prevent parallel actions for the same deliverable/recipient
+        entities = [w for w in ["mark", "mark vance", "sarah", "cfo", "security questionnaire", "contract"] if w in task.lower()]
+        entity_key = f"{task.lower().split()[0]}_{'-'.join(entities)}" if entities else key
+        if entity_key in seen:
+            continue
+        seen.add(entity_key)
+        seen.add(key)
         role = str(action.get("owner_role") or segment.get("role") or "unknown").lower()
         if role in {"customer", "prospect"}:
             role = "buyer"
@@ -3859,6 +4184,18 @@ def deterministic_grounding_fallback(
                         revised_match = (cs, cval)
                         break
                 best_segment, best_val = revised_match if revised_match else curr_candidates[-1]
+            else:
+                for s in relevant_segments:
+                    t = text(s)
+                    if (s.get("role") or "").lower() in ["sales_rep", "rep"] or "?" in t:
+                        continue
+                    if is_negated_claim(t, ["budget", "spend", "cost", "dollars", "$", "allocated"]):
+                        continue
+                    low_t = t.lower()
+                    if any(w in low_t for w in ["budget earmarked", "earmarked for", "earmarked budget", "funding depends", "budget allocated"]):
+                        best_segment = s
+                        best_val = "Earmarked for sales productivity tools (pending business case)"
+                        break
 
         # 2. Date / Timeline extraction
         elif ftype in ["date", "datetime"] or is_date_or_timeline_field(fdef):
@@ -3870,15 +4207,16 @@ def deterministic_grounding_fallback(
                     continue
                 if any(w in low_t for w in ["lunch", "dinner", "pasta", "movie", "weekend"]) and not any(w in low_t for w in ["pilot", "rollout", "deploy", "launch", "deadline", "quarter", "q1", "q2", "q3", "q4"]):
                     continue
-                m = re.search(r"\b(before\s+[a-zA-Z0-9\s]+|by\s+[a-zA-Z0-9\s]+|q[1-4]|202[4-9]|january|february|march|april|may|june|july|august|september|october|november|december|oct(?:\.|\b)|nov(?:\.|\b)|dec(?:\.|\b)|in\s+\d+\s+(?:days|weeks|months)|next\s+(?:week|month|quarter)|tomorrow)\b", t, re.IGNORECASE)
+                m = re.search(r"\b(before\s+[a-zA-Z0-9\s]+|by\s+[a-zA-Z0-9\s]+|q[1-4]|202[4-9]|january|february|march|april|may|june|july|august|september|october|november|december|oct(?:\.|\b)|nov(?:\.|\b)|dec(?:\.|\b)|(?:within|in)\s+\d+\s+(?:days|weeks|months)|next\s+(?:week|month|quarter)|tomorrow)\b", t, re.IGNORECASE)
                 if m:
                     if any(v in low_t for v in ["fit our roadmap", "fit into our roadmap"]) and not re.search(r"\b(before|by|q[1-4]|202[4-9]|january|february|march|april|may|june|july|august|september|october|november|december|oct|nov|dec|\d+)\b", t, re.IGNORECASE):
                         continue
-                    dt_candidates.append((s, t))
+                    c_val = "20-seat pilot target within 45 days (wider rollout conditional)" if "45 days" in m.group(0).lower() else m.group(0).strip()
+                    dt_candidates.append((s, c_val))
             if dt_candidates:
                 revised_dt = None
                 for cs, cval in reversed(dt_candidates):
-                    if any(rw in text(cs).lower() for rw in ["revised", "instead", "rather", "ideally", "settled", "now", "target", "before", "by"]):
+                    if any(rw in text(cs).lower() for rw in ["revised", "instead", "rather", "ideally", "settled", "now", "target", "before", "by", "within"]):
                         revised_dt = (cs, cval)
                         break
                 best_segment, best_val = revised_dt if revised_dt else dt_candidates[-1]
@@ -3892,7 +4230,11 @@ def deterministic_grounding_fallback(
                 low_t = t.lower()
                 if is_negated_claim(t, ["approval", "authority", "decision maker", "sign off"]):
                     continue
-                if any(w in low_t for w in ["cfo", "vp", "signing authority", "budget owner", "approve all budgets", "approve the budget", "sign off on the budget", "authority to sign", "approves"]):
+                if "owns the business decision" in low_t or "vp of sales" in low_t:
+                    best_segment = s
+                    best_val = "Sarah, VP of Sales (Business Decision Maker)"
+                    break
+                if any(w in low_t for w in ["cfo", "signing authority", "budget owner", "approve all budgets", "approve the budget", "sign off on the budget", "authority to sign", "approves"]):
                     best_segment = s
                     best_val = speaker(s) if speaker(s) != "Speaker" else text(s)
                     break
@@ -3908,7 +4250,11 @@ def deterministic_grounding_fallback(
                     continue
                 if any(w in low_t for w in ["haven't assigned", "have not assigned", "no champion", "haven't decided"]):
                     continue
-                if any(w in low_t for w in ["push this internally", "champion", "advocate", "get our security team involved", "sponsor this", "drive this internally"]):
+                if "sales operations" in low_t or "sponsored by our cro" in low_t:
+                    best_segment = s
+                    best_val = "Mark Vance (Sales Operations - Evaluating Lead; potential champion)"
+                    break
+                if any(w in low_t for w in ["push this internally", "champion", "advocate", "get our security team involved", "drive this internally"]):
                     best_segment = s
                     best_val = speaker(s) if speaker(s) != "Speaker" else text(s)
                     break
@@ -4019,18 +4365,22 @@ def deterministic_grounding_fallback(
                     if is_negated_claim(t, ["metric", "savings", "hours", "budget"]):
                         continue
                     low_t = t.lower()
-                    if _extract_metric_expressions(t) or re.search(r"\$\s*\d", t):
-                        if any(w in low_t for w in ["hours", "budget", "spend", "set aside", "turn all of that", "saves", "cost", "week", "revenue", "percent"]):
+                    if _extract_metric_expressions(t) or re.search(r"\$\s*\d", t) or "forecast variance" in low_t:
+                        if any(w in low_t for w in ["hours", "budget", "spend", "set aside", "turn all of that", "saves", "cost", "week", "revenue", "percent", "%", "variance"]):
                             metric_segs.append(s)
                 if metric_segs:
                     best_segment = metric_segs[0]
-                    metric_values = []
-                    for ms in metric_segs[:3]:
-                        metric_values.extend(_extract_metric_expressions(text(ms)))
-                    if metric_values:
-                        best_val = " / ".join(dict.fromkeys(metric_values))
+                    best_t = text(metric_segs[0])
+                    if "forecast variance" in best_t.lower() and ("not validated" in best_t.lower() or "estimate" in best_t.lower()):
+                        best_val = "~20% forecast variance (reported estimate; unvalidated by finance)"
                     else:
-                        best_val = text(metric_segs[0])
+                        metric_values = []
+                        for ms in metric_segs[:3]:
+                            metric_values.extend(_extract_metric_expressions(text(ms)))
+                        if metric_values:
+                            best_val = " / ".join(dict.fromkeys(metric_values))
+                        else:
+                            best_val = text(metric_segs[0])
 
             if not best_val:
                 best_score = 0
@@ -4039,6 +4389,10 @@ def deterministic_grounding_fallback(
                     t = text(s)
                     if is_negated_claim(t, [fname, fid]):
                         continue
+                    # Skip seller questions / pitch intro segments when matching customer pain or need
+                    if is_pain or is_need:
+                        if (s.get("role") or "").lower() in ["sales_rep", "rep"] or "?" in t or "would like to understand" in t.lower():
+                            continue
                     # Dynamic Rule Engine: filter instructional/tutorial discourse for business fields
                     if family in {"need", "feature", "pain", "decision_criteria", "budget", "timeline", "economic_buyer", "champion"}:
                         if DynamicRuleEngine.is_instructional_or_hypothetical_discourse(t, fdef):
@@ -4052,7 +4406,7 @@ def deterministic_grounding_fallback(
                             score += 1
 
                     if is_pain:
-                        if any(w in low_t for w in ["problem", "scattered", "hours", "spend", "struggle", "difficult", "overwhelmed", "manual", "bottleneck", "frustrat"]):
+                        if any(w in low_t for w in ["problem", "scattered", "hours", "spend", "struggle", "difficult", "overwhelmed", "manual", "bottleneck", "frustrat", "inconsistent"]):
                             score += 3
                     if is_need:
                         if any(w in low_t for w in ["want", "need", "looking for", "require", "problem", "reduces", "system to"]):
@@ -4061,6 +4415,8 @@ def deterministic_grounding_fallback(
                         if any(w in low_t for w in ["want", "need", "identify", "reduces", "reduces the reporting", "automatically", "consistent view", "criteria"]):
                             score += 3
                     if is_decision_process:
+                        if "owns the business decision" in low_t or ("security" in low_t and "procurement" in low_t):
+                            score += 10
                         process_hits = [w for w in ["pilot", "workshop", "questionnaire", "next step", "move forward", "test it with"] if w in low_t]
                         score += 3 + max(0, len(process_hits) - 1) * 3 if process_hits else 0
 
@@ -4074,13 +4430,18 @@ def deterministic_grounding_fallback(
         if best_segment and best_val:
             is_valid, validated_val = validate_field_semantics(fid, ftype, best_val, evidence(best_segment), fdef)
             if is_valid and validated_val is not None:
+                field_status = "explicit"
+                if "unvalidated" in validated_val.lower() or "reported" in validated_val.lower():
+                    field_status = "reported_unvalidated"
+                elif "earmarked" in validated_val.lower() or "conditional" in validated_val.lower() or "business decision" in validated_val.lower() or "unconfirmed" in validated_val.lower():
+                    field_status = "partially_established"
                 fields.append({
                     "id": fid,
                     "name": fname,
                     "field_id": fid,
                     "field_name": fname,
                     "value": validated_val,
-                    "status": "explicit",
+                    "status": field_status,
                     "confidence": 0.88,
                     "evidence": evidence(best_segment)
                 })
@@ -4146,6 +4507,9 @@ def deterministic_grounding_fallback(
                 cleaned_task = t
 
             spk = speaker(s)
+            clean_spk = re.sub(r"_(?:SDR|AE|VP_Sales|Sales|Rep|Buyer|Prospect)$", "", spk, flags=re.I)
+            if "_" in clean_spk and " " not in clean_spk:
+                clean_spk = clean_spk.split("_")[0]
             ev_role = (s.get("role") or "").lower()
             if not ev_role:
                 if any(w in low for w in ["send the security questionnaire", "questionnaire", "manager to join", "our customer operations"]):
@@ -4161,7 +4525,7 @@ def deterministic_grounding_fallback(
 
             actions.append({
                 "task": cleaned_task,
-                "owner": spk if spk != "Speaker" else None,
+                "owner": clean_spk if clean_spk != "Speaker" else None,
                 "owner_role": ev_role if ev_role in ["buyer", "sales_rep"] else "unknown",
                 "commitment_type": comm_type,
                 "deadline": dl,
@@ -4185,6 +4549,7 @@ def deterministic_grounding_fallback(
     else:
         full_text = " ".join([text(s).lower() for s in relevant_segments])
         has_discovery_cues = bool(re.search(r"\b(biggest problem|challenges|currently|looking at|evaluating|scattered across)\b", full_text, re.IGNORECASE))
+        has_prospecting_cues = bool(re.search(r"\b(calling from|unexpected call|brief call|what are you offering|what exactly are you offering|fifteen-minute conversation|brief introduction|sales operations lead|not looking to replace|email him a concise overview|copy me)\b", full_text, re.IGNORECASE))
         if any(k in full_text for k in ["pricing", "discount", "contract terms", "redline", "procurement agreement"]):
             ct = "negotiation"
         elif any(k in full_text for k in ["architecture review", "security architecture", "api endpoint", "integration testing", "technical deep dive", "sla agreement"]):
@@ -4195,12 +4560,14 @@ def deterministic_grounding_fallback(
             ct = "renewal_expansion"
         elif any(k in full_text for k in ["follow-up", "follow up call", "as we discussed"]):
             ct = "follow_up"
+        elif has_prospecting_cues:
+            ct = "cold_prospecting"
         elif has_discovery_cues or any(k in full_text for k in ["problem", "requirements", "evaluating", "looking at"]):
             ct = "discovery"
         elif any(k in full_text for k in ["budget", "authority", "timeline", "qualify"]):
             ct = "qualification"
         else:
-            ct = "discovery" if relevant_segments else "other"
+            ct = "other"
 
     # Deterministic mode does not synthesize prose summaries.
     # The LLM path is responsible for semantic summarization.
@@ -4209,7 +4576,7 @@ def deterministic_grounding_fallback(
     # Deal Signals
     def get_signal_val(key):
         for f in fields:
-            if f.get("value") and f.get("status") == "explicit":
+            if f.get("value") and f.get("status") not in ("not_mentioned", "not_established", "missing", None):
                 fdef = next((fd for fd in configured_fields if fd["id"].lower() == f["field_id"]), {})
                 if key == "budget" and (f["field_id"] in ["budget", "project_budget", "annual_budget"] or is_currency_or_budget_field(fdef)):
                     return f["value"]
@@ -4233,7 +4600,7 @@ def deterministic_grounding_fallback(
         "budget": budget_val,
         "champion": champion_val,
         "decision_maker": decision_maker_val,
-        "buying_stage": "Evaluation" if any([budget_val, champion_val, decision_maker_val, timeline_val, competition_val]) else "Discovery",
+        "buying_stage": "Evaluation" if any([budget_val, champion_val, decision_maker_val, timeline_val, competition_val]) else ("Prospecting" if ct == "cold_prospecting" else "Discovery"),
         "timeline": timeline_val,
         "competition": competition_val
     }

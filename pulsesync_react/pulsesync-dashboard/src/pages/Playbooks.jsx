@@ -122,22 +122,7 @@ export default function Playbooks() {
   const API_URL = import.meta.env.VITE_API_URL || (typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:3001` : "http://localhost:3001");
 
   const getMockCrmMapping = (name) => {
-    const maps = {
-      budget: "HubSpot → budget",
-      project_budget: "HubSpot → budget",
-      timeline: "HubSpot → timeline",
-      decision_maker: "HubSpot → decision_maker",
-      metrics: "HubSpot → metrics",
-      economic_buyer: "HubSpot → economic_buyer",
-      decision_criteria: "HubSpot → decision_criteria",
-      decision_process: "HubSpot → decision_process",
-      identify_pain: "HubSpot → identify_pain",
-      champion: "HubSpot → champion",
-      core_milestones: "HubSpot → milestones",
-      customer_pain_points: "HubSpot → pain_points",
-      action_plan: "HubSpot → action_plan"
-    };
-    return maps[name] || "None";
+    return "Not mapped";
   };
 
   // 1. Fetch Active Schema, Custom Fields, and Database Playbook Templates
@@ -540,7 +525,7 @@ export default function Playbooks() {
               <div>
                 <p className="text-[10px] font-bold text-[#64748B] uppercase tracking-wider">CRM Target sync</p>
                 <h3 className="text-xl font-bold text-[#0F172A] mt-1 tracking-tight">
-                  HubSpot CRM Connected
+                  Configured CRM Sync
                 </h3>
               </div>
               <div className="h-8 w-8 rounded bg-[#E0F2FE] text-[#0284C7] flex items-center justify-center font-bold text-xs">

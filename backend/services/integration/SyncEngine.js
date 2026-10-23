@@ -29,6 +29,94 @@ export class SyncEngine {
     return `https://app.hubspot.com/contacts/${pId}/record/${typeMap[type] || '0-3'}/${id}`;
   }
 
+  /**
+   * Safe serialization and normalization of values according to data and CRM field type.
+   * Guarantees no accidental [object Object] serialization.
+   */
+  _normalizeFieldValue(val, destinationField = '', destinationObject = 'deal', seen = new WeakSet()) {
+    if (val === null || val === undefined) return '';
+
+    if (typeof val === 'string') {
+      const trimmed = val.trim();
+      const lower = trimmed.toLowerCase();
+      if (['null', 'undefined', 'not mentioned', 'none', 'n/a', 'unknown', '-'].includes(lower)) {
+        return '';
+      }
+      if (destinationField === 'amount') {
+        const num = parseFloat(trimmed.replace(/[^0-9.]/g, ''));
+        return isNaN(num) ? trimmed : String(num);
+      }
+      if (destinationField === 'domain') {
+        return trimmed.replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0];
+      }
+      return trimmed;
+    }
+
+    if (typeof val === 'number') {
+      return String(val);
+    }
+
+    if (typeof val === 'boolean') {
+      return val ? 'true' : 'false';
+    }
+
+    if (typeof val === 'object') {
+      if (seen.has(val)) return '';
+      seen.add(val);
+
+      if (Array.isArray(val)) {
+        if (val.length === 0) return '';
+        const isPrimitiveArray = val.every(item => item === null || item === undefined || typeof item !== 'object');
+        if (isPrimitiveArray) {
+          return val.filter(item => item !== null && item !== undefined && String(item).trim() !== '').map(String).join(', ');
+        }
+        return val.map(item => {
+          if (!item || typeof item !== 'object') return String(item || '');
+          if (item.value !== undefined && item.value !== null) {
+            return this._normalizeFieldValue(item.value, destinationField, destinationObject, seen);
+          }
+          return item.title || item.task || item.name || item.label || item.quote || item.text || '';
+        }).filter(Boolean).join('; ');
+      }
+
+      if (val.value !== undefined && val.value !== null) {
+        return this._normalizeFieldValue(val.value, destinationField, destinationObject, seen);
+      }
+      if (val.name || val.title || val.task || val.label) {
+        return String(val.name || val.title || val.task || val.label);
+      }
+      try {
+        const entries = Object.entries(val).filter(([_, v]) => v !== null && v !== undefined && String(v).trim() !== '');
+        if (entries.length === 0) return '';
+        return entries.map(([k, v]) => `${k.replace(/_/g, ' ')}: ${typeof v === 'object' ? this._normalizeFieldValue(v, destinationField, destinationObject, seen) : v}`).join('; ');
+      } catch {
+        return '';
+      }
+    }
+
+    return String(val);
+  }
+
+  /**
+   * Validates value against CRM destination field type constraints.
+   */
+  _validatePropertyType(destinationField, destinationObject, normalizedValue) {
+    if (!normalizedValue) return null;
+    if (destinationField === 'amount') {
+      const num = parseFloat(String(normalizedValue).replace(/[^0-9.]/g, ''));
+      if (isNaN(num)) {
+        return `Expected numeric amount for ${destinationObject}.${destinationField}, got "${normalizedValue}"`;
+      }
+    }
+    if (destinationField === 'closedate') {
+      const timestamp = new Date(normalizedValue).getTime();
+      if (isNaN(timestamp)) {
+        return `Expected valid date for ${destinationObject}.${destinationField}, got "${normalizedValue}"`;
+      }
+    }
+    return null;
+  }
+
   getAdapter(provider = 'hubspot') {
     const adapter = this.adapters[provider.toLowerCase()];
     if (!adapter) {
@@ -130,6 +218,7 @@ export class SyncEngine {
     const defaultMappings = [
       { playbook_field_name: 'metrics', destination_object: 'deal', destination_field_name: 'pulsesync_metrics' },
       { playbook_field_name: 'budget', destination_object: 'deal', destination_field_name: 'amount' },
+      { playbook_field_name: 'deal_amount', destination_object: 'deal', destination_field_name: 'amount' },
       { playbook_field_name: 'economic_buyer', destination_object: 'deal', destination_field_name: 'pulsesync_economic_buyer' },
       { playbook_field_name: 'economic buyer', destination_object: 'deal', destination_field_name: 'pulsesync_economic_buyer' },
       { playbook_field_name: 'decision_maker', destination_object: 'deal', destination_field_name: 'pulsesync_decision_maker' },
@@ -150,6 +239,9 @@ export class SyncEngine {
       { playbook_field_name: 'competition', destination_object: 'deal', destination_field_name: 'pulsesync_competitors' },
       { playbook_field_name: 'timeline', destination_object: 'deal', destination_field_name: 'closedate' },
       { playbook_field_name: 'deal_stage', destination_object: 'deal', destination_field_name: 'dealstage' },
+      { playbook_field_name: 'summary', destination_object: 'deal', destination_field_name: 'description' },
+      { playbook_field_name: 'overview', destination_object: 'deal', destination_field_name: 'description' },
+      { playbook_field_name: 'meeting_summary', destination_object: 'deal', destination_field_name: 'description' },
       { playbook_field_name: 'industry', destination_object: 'company', destination_field_name: 'industry' },
       { playbook_field_name: 'company_name', destination_object: 'company', destination_field_name: 'name' },
       { playbook_field_name: 'website', destination_object: 'company', destination_field_name: 'domain' }
@@ -176,6 +268,7 @@ export class SyncEngine {
     let extractions = {};
     let dealIntelligence = {};
     let summary = {};
+    let parsedExtractedData = {};
 
     if (!this.useFallbackDb) {
       const mRes = await this.pool.query('SELECT * FROM meetings WHERE id = $1', [meetingId]);
@@ -194,6 +287,7 @@ export class SyncEngine {
       if (extRes.rows.length > 0) {
         const raw = extRes.rows[0].extracted_data;
         const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        parsedExtractedData = parsed || {};
         extractions = parsed?.extractions || parsed?.extracted_data || parsed || {};
       }
 
@@ -209,9 +303,22 @@ export class SyncEngine {
       const ext = (data.call_extractions || []).find(e => e.meeting_id === meetingId);
       if (ext) {
         const raw = typeof ext.extracted_data === 'string' ? JSON.parse(ext.extracted_data) : ext.extracted_data;
+        parsedExtractedData = raw || {};
         extractions = raw?.extractions || raw?.extracted_data || raw || {};
       }
       summary = (data.summaries || []).find(s => s.meeting_id === meetingId) || {};
+    }
+
+    const fallbackApprovals = this.useFallbackDb
+      ? ((this.readFallbackDb().approvals || []).filter(a => a.meeting_id === meetingId))
+      : [];
+
+    if (!dealIntelligence || Object.keys(dealIntelligence).length === 0) {
+      if (meeting.deal_intelligence) {
+        dealIntelligence = typeof meeting.deal_intelligence === 'string' ? JSON.parse(meeting.deal_intelligence) : meeting.deal_intelligence;
+      } else if (parsedExtractedData?.deal_signals) {
+        dealIntelligence = typeof parsedExtractedData.deal_signals === 'string' ? JSON.parse(parsedExtractedData.deal_signals) : parsedExtractedData.deal_signals;
+      }
     }
 
     const targetPortalId = portalId || integration?.auth_metadata?.portal_id || integration?.auth_metadata?.account_name || process.env.HUBSPOT_PORTAL_ID || '';
@@ -282,83 +389,205 @@ export class SyncEngine {
     }
 
     // 3. Compute Field Diffs
+    const normalize = str => String(str || '').toLowerCase().replace(/[\s_-]+/g, '');
     const mappings = await this.getFieldMappings('00000000-0000-0000-0000-000000000001', integrationId);
 
     // Merge PulseSync intelligence properties dynamically from the verified single source of truth
     const combinedProps = {};
+    const fieldReviewStatuses = {};
 
-    // A. Add template extractions (strictly only fields present in this meeting's playbook)
-    for (const [key, val] of Object.entries(extractions)) {
-      if (val !== null && val !== undefined && String(val).toLowerCase() !== 'null' && String(val).toLowerCase() !== 'not mentioned' && String(val).trim() !== '') {
-        combinedProps[key] = String(val);
+    const INTERNAL_CONTAINER_KEYS = new Set([
+      'fields',
+      'template_fields',
+      'profile',
+      'meeting_id',
+      'action_items',
+      'deal_signals',
+      'deal_signal_objects',
+      'conversation_intelligence',
+      'summary_sections',
+      'irrelevant_segments',
+      'call_type',
+      'call_type_rationale',
+      'call_type_confidence',
+      'sales_relevance',
+      'sales_relevance_rationale',
+      'review',
+      'insights',
+      'risks',
+      'objections',
+      'companyMetadata',
+      'templateId'
+    ]);
+
+    // A. Add template / playbook extractions from structured field arrays if present
+    const fieldList = Array.isArray(parsedExtractedData?.template_fields)
+      ? parsedExtractedData.template_fields
+      : (Array.isArray(parsedExtractedData?.fields) ? parsedExtractedData.fields : []);
+
+    for (const f of fieldList) {
+      if (!f || typeof f !== 'object') continue;
+      const fKey = f.field_id || f.field_name || f.field || f.id || f.fieldKey || f.name;
+      if (!fKey || INTERNAL_CONTAINER_KEYS.has(fKey)) continue;
+      const rawVal = f.value;
+      if (rawVal !== null && rawVal !== undefined && String(rawVal).toLowerCase() !== 'null' && String(rawVal).toLowerCase() !== 'not mentioned' && String(rawVal).trim() !== '') {
+        combinedProps[fKey] = rawVal;
+        fieldReviewStatuses[fKey.toLowerCase()] = f.review_status || f.status || 'needs_review';
       }
     }
 
-    // B. Add deal signals if present
+    // B. Add template extractions from extractions object (strictly playbook fields)
+    const extObj = (parsedExtractedData?.extractions && typeof parsedExtractedData.extractions === 'object' && !Array.isArray(parsedExtractedData.extractions))
+      ? parsedExtractedData.extractions
+      : (extractions && typeof extractions === 'object' && !Array.isArray(extractions) ? extractions : {});
+
+    for (const [key, val] of Object.entries(extObj)) {
+      if (INTERNAL_CONTAINER_KEYS.has(key)) continue;
+      if (val !== null && val !== undefined && String(val).toLowerCase() !== 'null' && String(val).toLowerCase() !== 'not mentioned' && String(val).trim() !== '') {
+        if (!combinedProps[key]) {
+          combinedProps[key] = val;
+        }
+      }
+    }
+
+    // C. Check review field_states if reviewer approved or edited fields
+    const persistedReviewStates = parsedExtractedData?.review?.field_states || {};
+    for (const [rKey, rState] of Object.entries(persistedReviewStates)) {
+      if (INTERNAL_CONTAINER_KEYS.has(rKey)) continue;
+      if (rState && rState.status) {
+        fieldReviewStatuses[rKey.toLowerCase()] = rState.status;
+      }
+      if (rState && rState.value !== undefined && rState.value !== null && String(rState.value).trim() !== '') {
+        combinedProps[rKey] = rState.value;
+      }
+    }
+
+    // D. Add individual deal signals if present
     if (dealIntelligence && typeof dealIntelligence === 'object') {
       for (const [k, v] of Object.entries(dealIntelligence)) {
+        if (INTERNAL_CONTAINER_KEYS.has(k)) continue;
         if (v !== null && v !== undefined && String(v).toLowerCase() !== 'null' && String(v).toLowerCase() !== 'not mentioned' && String(v).trim() !== '') {
           if (!combinedProps[k]) {
-            combinedProps[k] = String(v);
+            combinedProps[k] = v;
           }
         }
       }
     }
 
-    // C. Add verified company metadata if present
+    // E. Add verified company metadata if present
     if (companyName && companyName !== 'Acme' && companyName !== 'Untitled') {
       combinedProps.company_name = companyName;
+      fieldReviewStatuses.company_name = 'approved';
     }
     if (companyDomain) {
       combinedProps.website = `https://${companyDomain}`;
+      fieldReviewStatuses.website = 'approved';
     }
     if (company?.industry && company.industry !== 'Unknown') {
       combinedProps.industry = company.industry;
+      fieldReviewStatuses.industry = 'approved';
+    }
+
+    // F. Authoritative meeting summary (only when explicitly mapped to CRM property)
+    let cleanOverview = String(summary?.overview || meeting?.overview || '').trim();
+    if (cleanOverview && cleanOverview !== 'No grounded business summary was produced from the available evidence.') {
+      // Ensure commitments/next steps remain strictly in the task flow and do not pollute the CRM business description
+      cleanOverview = cleanOverview.replace(/\s*(?:Agreed next steps|Next steps):\s*.*$/i, '').trim();
+      const summaryMapping = mappings.get('summary') || mappings.get('overview') || mappings.get('meeting_summary');
+      if (summaryMapping && cleanOverview) {
+        combinedProps.summary = cleanOverview;
+        fieldReviewStatuses.summary = 'approved';
+      }
     }
 
     const fieldDiffs = [];
     const warnings = [];
 
-    for (const [propName, propValue] of Object.entries(combinedProps)) {
-      if (!propValue) continue;
+    for (const [propName, rawPropVal] of Object.entries(combinedProps)) {
+      if (rawPropVal === null || rawPropVal === undefined) continue;
 
       const mapping = mappings.get(propName.toLowerCase());
-      if (!mapping) {
+      const isMapped = Boolean(mapping && mapping.destination_field_name && mapping.destination_field_name.toLowerCase() !== 'unmapped');
+      const destObj = isMapped ? mapping.destination_object : 'deal';
+      const destField = isMapped ? mapping.destination_field_name : 'unmapped';
+
+      const normalizedVal = this._normalizeFieldValue(rawPropVal, destField, destObj);
+      if (!normalizedVal) continue;
+
+      // Type validation against destination CRM property constraints
+      const typeError = isMapped ? this._validatePropertyType(destField, destObj, normalizedVal) : null;
+      if (typeError) {
+        warnings.push(typeError);
+      }
+
+      // Check approval status
+      let reviewStatus = fieldReviewStatuses[propName.toLowerCase()];
+      if (!reviewStatus && fallbackApprovals.length > 0) {
+        const found = fallbackApprovals.find(a => (a.field || '').toLowerCase() === propName.toLowerCase());
+        if (found) reviewStatus = found.status;
+      }
+      if (!reviewStatus && options.approvedFields && Array.isArray(options.approvedFields)) {
+        const normProp = normalize(propName);
+        if (options.approvedFields.some(af => normalize(af) === normProp || (isMapped && normalize(af) === normalize(destField)))) {
+          reviewStatus = 'approved';
+        }
+      }
+      if (!reviewStatus) {
+        reviewStatus = ['company_name', 'website', 'industry'].includes(propName.toLowerCase()) ? 'approved' : 'needs_review';
+      }
+
+      const isApproved = reviewStatus === 'approved';
+
+      if (!isMapped) {
         fieldDiffs.push({
           pulseSyncField: propName,
-          destinationObject: 'deal',
+          destinationObject: destObj,
           destinationField: 'unmapped',
           previousValue: null,
-          newValue: propValue,
-          status: 'UNMAPPED'
+          newValue: normalizedVal,
+          status: 'UNMAPPED',
+          isMapped: false,
+          isApproved,
+          approvalStatus: reviewStatus,
+          mappingStatus: 'UNMAPPED',
+          isEligibleForSync: false,
+          validationError: null
         });
         continue;
       }
 
       let prevVal = null;
-      if (mapping.destination_object === 'company' && matchedCompany) {
-        prevVal = matchedCompany.properties ? matchedCompany.properties[mapping.destination_field_name] : null;
-      } else if (mapping.destination_object === 'deal' && matchedDeal) {
-        prevVal = matchedDeal.properties ? matchedDeal.properties[mapping.destination_field_name] : null;
+      if (destObj === 'company' && matchedCompany) {
+        prevVal = matchedCompany.properties ? matchedCompany.properties[destField] : null;
+      } else if (destObj === 'deal' && matchedDeal) {
+        prevVal = matchedDeal.properties ? matchedDeal.properties[destField] : null;
       }
 
       let changeStatus = 'CREATE';
-      if (prevVal) {
-        if (String(prevVal).trim().toLowerCase() === String(propValue).trim().toLowerCase()) {
+      if (typeError) {
+        changeStatus = 'TYPE_INCOMPATIBLE';
+      } else if (prevVal !== null && prevVal !== undefined && String(prevVal).trim() !== '') {
+        if (String(prevVal).trim().toLowerCase() === String(normalizedVal).trim().toLowerCase()) {
           changeStatus = 'UNCHANGED';
         } else {
           changeStatus = 'UPDATE';
-          warnings.push(`Overwriting existing ${mapping.destination_object} field "${mapping.destination_field_name}" (${prevVal} → ${propValue})`);
+          warnings.push(`Overwriting existing ${destObj} field "${destField}" (${prevVal} → ${normalizedVal})`);
         }
       }
 
       fieldDiffs.push({
         pulseSyncField: propName,
-        destinationObject: mapping.destination_object,
-        destinationField: mapping.destination_field_name,
+        destinationObject: destObj,
+        destinationField: destField,
         previousValue: prevVal,
-        newValue: propValue,
-        status: changeStatus
+        newValue: normalizedVal,
+        status: changeStatus,
+        isMapped: true,
+        isApproved,
+        approvalStatus: reviewStatus,
+        mappingStatus: changeStatus,
+        isEligibleForSync: isApproved && !typeError,
+        validationError: typeError
       });
     }
 
@@ -722,13 +951,26 @@ export class SyncEngine {
 
     const normalize = str => String(str || '').toLowerCase().replace(/[\s_-]+/g, '');
 
-    // Strict validation: Only sync user-approved fields
+    // Strict validation: Only sync user-approved, mapped, and valid fields
     const approvedDiffs = (payload.approvedFields && Array.isArray(payload.approvedFields))
-      ? prep.fieldDiffs.filter(d => payload.approvedFields.some(af =>
-        normalize(af) === normalize(d.pulseSyncField) ||
-        normalize(af) === normalize(d.destinationField)
-      ))
-      : prep.fieldDiffs.filter(d => d.status !== 'SKIPPED' && d.status !== 'UNMAPPED');
+      ? prep.fieldDiffs.filter(d =>
+          d.isMapped &&
+          d.destinationField !== 'unmapped' &&
+          d.status !== 'UNMAPPED' &&
+          d.status !== 'SKIPPED' &&
+          !d.validationError &&
+          payload.approvedFields.some(af =>
+            normalize(af) === normalize(d.pulseSyncField) ||
+            normalize(af) === normalize(d.destinationField)
+          )
+        )
+      : prep.fieldDiffs.filter(d =>
+          d.isMapped &&
+          d.destinationField !== 'unmapped' &&
+          d.status !== 'SKIPPED' &&
+          d.status !== 'UNMAPPED' &&
+          !d.validationError
+        );
 
     // Reconcile IDs: reuse existing HubSpot IDs from previous partial runs or meeting table
     let companyId = meeting.crm_company_id || existingPartialRecords.companyId || prep.resolvedRecords?.company?.id || null;
@@ -749,6 +991,8 @@ export class SyncEngine {
           companyProps.name = d.newValue;
         } else if (d.destinationField === 'industry') {
           companyProps.industry = 'COMPUTER_SOFTWARE';
+        } else if (d.destinationField && d.destinationField !== 'unmapped') {
+          companyProps[d.destinationField] = d.newValue;
         }
       }
       if (d.destinationObject === 'deal') {
@@ -759,6 +1003,8 @@ export class SyncEngine {
           dealProps.closedate = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).getTime();
         } else if (d.destinationField === 'dealstage') {
           dealProps.dealstage = d.newValue || 'appointmentscheduled';
+        } else if (d.destinationField && d.destinationField !== 'unmapped') {
+          dealProps[d.destinationField] = d.newValue;
         }
       }
     });
@@ -779,12 +1025,30 @@ export class SyncEngine {
           hubspotCompanyUrl = this._buildHubSpotUrl('company', companyId, resolvedPortalId);
         }
       } else {
-        const created = await adapter.createCompany(accessToken, {
-          name: prep.resolvedRecords?.company?.name || company?.name || meeting.title.split(' ')[0] || 'Acme',
-          ...companyProps
-        });
-        companyId = created.id;
-        hubspotCompanyUrl = created?.url || this._buildHubSpotUrl('company', companyId, resolvedPortalId);
+        try {
+          const created = await adapter.createCompany(accessToken, {
+            name: prep.resolvedRecords?.company?.name || company?.name || meeting.title.split(' ')[0] || 'Acme',
+            ...companyProps
+          });
+          companyId = created.id;
+          hubspotCompanyUrl = created?.url || this._buildHubSpotUrl('company', companyId, resolvedPortalId);
+        } catch (cpErr) {
+          const errMsg = cpErr.hubspotError?.message || cpErr.message || '';
+          if (errMsg.includes('Existing ID:')) {
+            const match = errMsg.match(/Existing ID:\s*([0-9]+)/);
+            if (match && match[1]) {
+              companyId = match[1];
+              hubspotCompanyUrl = this._buildHubSpotUrl('company', companyId, resolvedPortalId);
+              if (Object.keys(companyProps).length > 0) {
+                await adapter.updateCompany(accessToken, companyId, companyProps).catch(() => { });
+              }
+            } else {
+              throw cpErr;
+            }
+          } else {
+            throw cpErr;
+          }
+        }
       }
 
       // 6. Execute Contacts
@@ -835,12 +1099,31 @@ export class SyncEngine {
           hubspotDealUrl = this._buildHubSpotUrl('deal', dealId, resolvedPortalId);
         }
       } else {
-        const created = await adapter.createDeal(accessToken, {
-          dealname: prep.resolvedRecords?.deal?.name || `${prep.resolvedRecords?.company?.name || 'Enterprise'} - Expansion`,
-          ...dealProps
-        }, { companyId, contactIds: syncedContactIds });
-        dealId = created.id;
-        hubspotDealUrl = created?.url || this._buildHubSpotUrl('deal', dealId, resolvedPortalId);
+        const dealName = prep.resolvedRecords?.deal?.name || `${prep.resolvedRecords?.company?.name || 'Enterprise'} - Expansion`;
+        let existingDeal = null;
+        try {
+          const deals = await adapter.searchDeal(accessToken, { name: dealName, companyId });
+          if (Array.isArray(deals) && deals.length > 0) {
+            existingDeal = deals[0];
+          }
+        } catch { }
+
+        if (existingDeal && existingDeal.id) {
+          dealId = existingDeal.id;
+          if (Object.keys(dealProps).length > 0) {
+            const updated = await adapter.updateDeal(accessToken, dealId, dealProps);
+            hubspotDealUrl = updated?.url || this._buildHubSpotUrl('deal', dealId, resolvedPortalId);
+          } else {
+            hubspotDealUrl = this._buildHubSpotUrl('deal', dealId, resolvedPortalId);
+          }
+        } else {
+          const created = await adapter.createDeal(accessToken, {
+            dealname: dealName,
+            ...dealProps
+          }, { companyId, contactIds: syncedContactIds });
+          dealId = created.id;
+          hubspotDealUrl = created?.url || this._buildHubSpotUrl('deal', dealId, resolvedPortalId);
+        }
       }
 
       // 8. Execute CRM Tasks (reconciling to avoid duplicate tasks)

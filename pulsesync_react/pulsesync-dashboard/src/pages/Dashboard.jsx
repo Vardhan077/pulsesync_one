@@ -100,6 +100,39 @@ const getEvidenceDetails = (evidence, segments = []) => {
   };
 };
 
+const formatDisplayValue = (val) => {
+  if (val === null || val === undefined) return '—';
+  if (typeof val === 'string') {
+    if (!val.trim()) return '—';
+    return val;
+  }
+  if (typeof val === 'number' || typeof val === 'boolean') {
+    return String(val);
+  }
+  if (Array.isArray(val)) {
+    if (val.length === 0) return '—';
+    return val
+      .map(item => {
+        if (item === null || item === undefined) return '';
+        if (typeof item === 'object') {
+          return item.name || item.title || item.task || item.label || item.value || JSON.stringify(item);
+        }
+        return String(item);
+      })
+      .filter(Boolean)
+      .join(', ') || '—';
+  }
+  if (typeof val === 'object') {
+    const keys = Object.keys(val);
+    if (keys.length === 0) return '—';
+    if (val.name || val.title || val.label || val.value) {
+      return String(val.name || val.title || val.label || val.value);
+    }
+    return JSON.stringify(val);
+  }
+  return String(val);
+};
+
 export default function Dashboard() {
   const API_URL = import.meta.env.VITE_API_URL || (typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.hostname}:3001` : "http://localhost:3001");
 
@@ -2831,7 +2864,7 @@ export default function Dashboard() {
                                   <div className="p-3 bg-white/90 rounded-lg border border-emerald-100 shadow-3xs">
                                     <span className="text-[10px] font-bold text-[#64748B] uppercase tracking-wider block">Contacts Associated</span>
                                     <span className="text-base font-extrabold text-emerald-700">
-                                      {syncSuccessData?.summary?.contactsProcessedCount ?? (speakers.length || 1)}
+                                      {syncSuccessData?.summary?.contactsProcessedCount ?? speakers.length}
                                     </span>
                                   </div>
                                   <div className="p-3 bg-white/90 rounded-lg border border-emerald-100 shadow-3xs">
@@ -3026,7 +3059,7 @@ export default function Dashboard() {
                                             <td className="py-2 px-3 font-bold text-[#0F172A]">{item.field_name || item.pulseSyncField}</td>
                                             <td className="py-2 px-3 font-mono text-[10px] uppercase text-[#64748B]">{item.target_object || item.destinationObject || 'deal'}</td>
                                             <td className="py-2 px-3 font-mono text-[#0F766E]">{item.target_field || item.destinationField}</td>
-                                            <td className="py-2 px-3 font-semibold text-[#0F172A] max-w-xs truncate">{String(item.new_value ?? '')}</td>
+                                            <td className="py-2 px-3 font-semibold text-[#0F172A] max-w-xs truncate">{formatDisplayValue(item.new_value ?? '')}</td>
                                             <td className="py-2 px-3 text-right">
                                               <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
                                                 {item.status || 'SYNCHRONIZED'}
@@ -3284,12 +3317,49 @@ export default function Dashboard() {
                                             <tr key={idx} className="hover:bg-[#FAFBFB]">
                                               <td className="py-2.5 px-3 font-bold text-[#0F172A]">{diff.pulseSyncField}</td>
                                               <td className="py-2.5 px-3 font-mono text-[10px] uppercase text-[#64748B]">{diff.destinationObject}</td>
-                                              <td className="py-2.5 px-3 font-mono text-[#0F766E]">{diff.destinationField}</td>
-                                              <td className="py-2.5 px-3 font-semibold text-[#0F172A]">{diff.newValue}</td>
+                                              <td className="py-2.5 px-3 font-mono">
+                                                {diff.destinationField && diff.destinationField !== 'unmapped' ? (
+                                                  <span className="text-[#0F766E] font-medium">{diff.destinationField}</span>
+                                                ) : (
+                                                  <span className="text-[#94A3B8] italic">unmapped</span>
+                                                )}
+                                              </td>
+                                              <td className="py-2.5 px-3 font-semibold text-[#0F172A] max-w-xs break-words">
+                                                {formatDisplayValue(diff.newValue)}
+                                              </td>
                                               <td className="py-2.5 px-3 text-right">
-                                                <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold border bg-emerald-50 text-emerald-700 border-emerald-200">
-                                                  Approved &bull; {diff.status}
-                                                </span>
+                                                <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                                                  {diff.isApproved ? (
+                                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                                      Approved
+                                                    </span>
+                                                  ) : (
+                                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                                                      Needs Review
+                                                    </span>
+                                                  )}
+                                                  {diff.validationError ? (
+                                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-rose-50 text-rose-700 border border-rose-200" title={diff.validationError}>
+                                                      Invalid
+                                                    </span>
+                                                  ) : (!diff.isMapped || diff.status === 'UNMAPPED' || diff.destinationField === 'unmapped') ? (
+                                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-100 text-slate-500 border border-slate-200">
+                                                      Unmapped
+                                                    </span>
+                                                  ) : diff.status === 'CREATE' ? (
+                                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-50 text-blue-700 border border-blue-200">
+                                                      Create
+                                                    </span>
+                                                  ) : diff.status === 'UPDATE' ? (
+                                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-teal-50 text-teal-700 border border-teal-200">
+                                                      Update
+                                                    </span>
+                                                  ) : (
+                                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-50 text-slate-600 border border-slate-200">
+                                                      {diff.status}
+                                                    </span>
+                                                  )}
+                                                </div>
                                               </td>
                                             </tr>
                                           ))}

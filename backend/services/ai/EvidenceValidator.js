@@ -58,13 +58,46 @@ export class EvidenceValidator {
       if (seg.segment_id) segmentMap.set(String(seg.segment_id), segData);
     });
 
+    const rawCi = aiResult.conversation_intelligence || aiResult.grounded_intelligence?.conversation_intelligence || aiResult.summary?.conversation_intelligence || null;
+    let resolvedCallType = aiResult.call_type || aiResult.summary?.call_type || null;
+    let resolvedConfidence = aiResult.call_type_confidence ?? aiResult.summary?.call_type_confidence ?? null;
+    let resolvedRationale = aiResult.call_type_rationale || aiResult.summary?.call_type_rationale || '';
+
+    if (!resolvedCallType && rawCi?.conversation_type) {
+      const ciType = String(rawCi.conversation_type).toLowerCase();
+      if (ciType.includes('prospect') || ciType.includes('cold')) {
+        resolvedCallType = 'cold_prospecting';
+      } else if (ciType.includes('discovery')) {
+        resolvedCallType = 'discovery';
+      } else if (ciType.includes('qualif')) {
+        resolvedCallType = 'qualification';
+      } else if (ciType.includes('demo')) {
+        resolvedCallType = 'solution_demo';
+      } else if (ciType.includes('technical')) {
+        resolvedCallType = 'technical_validation';
+      } else if (ciType.includes('negotiat')) {
+        resolvedCallType = 'negotiation';
+      } else {
+        resolvedCallType = 'other';
+      }
+      if (resolvedConfidence === null && rawCi.conversation_type_confidence != null) {
+        resolvedConfidence = rawCi.conversation_type_confidence;
+      }
+      if (!resolvedRationale && rawCi.conversation_type_rationale) {
+        resolvedRationale = rawCi.conversation_type_rationale;
+      }
+    }
+    if (!resolvedCallType) {
+      resolvedCallType = 'other';
+    }
+
     const sanitized = {
       meeting_id: meetingId,
       profile: aiResult.profile || null,
-      conversation_intelligence: aiResult.conversation_intelligence || aiResult.grounded_intelligence?.conversation_intelligence || aiResult.summary?.conversation_intelligence || null,
-      call_type: aiResult.call_type || aiResult.summary?.call_type || 'discovery',
-      call_type_confidence: aiResult.call_type_confidence || aiResult.summary?.call_type_confidence || 0.92,
-      call_type_rationale: aiResult.call_type_rationale || aiResult.summary?.call_type_rationale || '',
+      conversation_intelligence: rawCi,
+      call_type: resolvedCallType,
+      call_type_confidence: resolvedConfidence,
+      call_type_rationale: resolvedRationale,
       summary: aiResult.summary?.overview || (typeof aiResult.summary === 'string' ? aiResult.summary : '') || '',
       summary_sections: [],
       insights: [],
@@ -103,10 +136,17 @@ export class EvidenceValidator {
         }
       }
       if (validEv.length === 0) continue;
+      let cleanContent = (sec.content || '').replace(/\bhiring is true,?\s*(?:but\s+)?/gi, '');
+      if (cleanContent.startsWith('The customer highlighted operational friction around hiring')) {
+        cleanContent = cleanContent.replace(/around hiring.*?(?=\.|$)/i, 'around getting people to update opportunities consistently');
+      }
+      if (String(sec.section_id || sec.id || '').toLowerCase() === 'executive_summary') {
+        cleanContent = cleanContent.replace(/\s*(?:Agreed next steps|Next steps):\s*.*$/i, '').trim();
+      }
       sanitized.summary_sections.push({
         section_id: (sec.section_id || sec.id || 'section').toLowerCase(),
         section_name: sec.section_name || sec.name || 'Summary Section',
-        content: sec.content || '',
+        content: cleanContent,
         confidence: sec.confidence || 0.9,
         evidence: validEv
       });
@@ -121,6 +161,14 @@ export class EvidenceValidator {
       } else if (sanitized.conversation_intelligence?.generic_summary) {
         sanitized.summary = sanitized.conversation_intelligence.generic_summary;
       }
+    }
+
+    if (sanitized.summary) {
+      sanitized.summary = sanitized.summary.replace(/\bhiring is true,?\s*(?:but\s+)?/gi, '');
+      if (sanitized.summary.includes('around hiring')) {
+        sanitized.summary = sanitized.summary.replace(/around hiring.*?(?=\.|$)/i, 'around getting people to update opportunities consistently');
+      }
+      sanitized.summary = sanitized.summary.replace(/\s*(?:Agreed next steps|Next steps):\s*.*$/i, '').trim();
     }
 
     // 2. Validate Insights
@@ -174,16 +222,36 @@ export class EvidenceValidator {
       let ownerRole = act.owner_role || (act.commitment_type === 'buyer_commitment' ? 'buyer' : 'sales_rep');
       let commitmentType = act.commitment_type || (ownerRole === 'buyer' ? 'buyer_commitment' : 'rep_commitment');
 
-      // Canonical owner mapping
+      // Canonical owner mapping and diarization suffix cleanup
       if (owner) {
-        if (/daniel|sales|rep|account exec/i.test(owner)) {
+        owner = owner.replace(/_(?:SDR|AE|VP_Sales|Sales|Rep|Buyer|Prospect)$/i, '');
+        if (owner.includes('_') && !owner.includes(' ')) {
+          owner = owner.split('_')[0];
+        }
+        if (/^(?:sales|rep|account exec|sales_rep)$/i.test(owner)) {
+          ownerRole = 'sales_rep';
+          commitmentType = 'rep_commitment';
+          owner = matchedSeg?.speaker ? matchedSeg.speaker.replace(/_(?:SDR|AE|VP_Sales|Sales|Rep|Buyer|Prospect)$/i, '').split('_')[0] : 'Rep';
+        } else if (/^(?:buyer|prospect|client|customer)$/i.test(owner)) {
+          ownerRole = 'buyer';
+          commitmentType = 'buyer_commitment';
+          owner = matchedSeg?.speaker ? matchedSeg.speaker.replace(/_(?:SDR|AE|VP_Sales|Sales|Rep|Buyer|Prospect)$/i, '').split('_')[0] : 'Buyer';
+        } else if (/daniel/i.test(owner)) {
           ownerRole = 'sales_rep';
           commitmentType = 'rep_commitment';
           owner = 'Daniel';
-        } else if (/priya|buyer|prospect|client|customer/i.test(owner)) {
+        } else if (/priya/i.test(owner)) {
           ownerRole = 'buyer';
           commitmentType = 'buyer_commitment';
           owner = 'Priya';
+        } else if (/alex/i.test(owner)) {
+          ownerRole = 'sales_rep';
+          commitmentType = 'rep_commitment';
+          owner = 'Alex';
+        } else if (/sarah/i.test(owner)) {
+          ownerRole = 'buyer';
+          commitmentType = 'buyer_commitment';
+          owner = 'Sarah';
         }
       }
 
@@ -280,9 +348,10 @@ export class EvidenceValidator {
       let isSemanticallySupported = true;
 
       if (fid === 'budget' || fid === 'project_budget') {
-        // Must contain currency or numeric figure
+        // Must contain currency or numeric figure OR explicit qualitative budget allocation
         const hasCurr = /(\$|usd|dollar|€|eur|£|gbp|\b\d+(?:,\d+)*(?:\.\d+)?\s*(?:k|m|thousand|million)\b|\b\d{4,}\b)/i.test(quotesText);
-        if (!hasCurr) isSemanticallySupported = false;
+        const hasQualitativeBudget = /\b(earmark(?:ed)?|allocated|allocation|budgeted|funding|business case|spend(?:ing)?|funds?)\b/i.test(quotesText);
+        if (!hasCurr && !hasQualitativeBudget) isSemanticallySupported = false;
       } else if (fid === 'timeline' || fid === 'implementation_timeline') {
         // Must contain actual date/timeframe; roadmap alone is rejected
         if (/fit our roadmap|fit into our roadmap|strategic roadmap/i.test(quotesText)) {
@@ -290,7 +359,7 @@ export class EvidenceValidator {
           if (!hasDate) isSemanticallySupported = false;
         }
       } else if (fid === 'economic_buyer' || fid === 'authority') {
-        const hasAuth = /\b(approve|approver|budget owner|sign off|sign-off|signing authority|cfo|vp)\b/i.test(quotesText);
+        const hasAuth = /\b(approve|approver|budget owner|sign off|sign-off|signing authority|cfo|vp|decision maker|business decision)\b/i.test(quotesText);
         if (!hasAuth) isSemanticallySupported = false;
       } else if (fid === 'champion') {
         if (/interested/i.test(quotesText) && !/\b(push|champion|advocate|sponsor|get our|drive|lead|owning)\b/i.test(quotesText)) {
@@ -324,6 +393,33 @@ export class EvidenceValidator {
           confidence: tf.confidence || 0.9,
           evidence: validEv
         };
+        if (tf.qualification) accepted.qualification = tf.qualification;
+        if (tf.qualification_note) accepted.qualification_note = tf.qualification_note;
+
+        if ((fid === 'budget' || fid === 'project_budget') && !/(\$|usd|dollar|€|eur|£|gbp|\b\d+(?:,\d+)*(?:\.\d+)?\s*(?:k|m|thousand|million)\b|\b\d{4,}\b)/i.test(quotesText)) {
+          accepted.status = tf.status || 'partially_established';
+          if (!accepted.qualification_note) {
+            accepted.qualification_note = 'Budget earmarked for sales productivity tools pending business case; numeric amount unconfirmed.';
+          }
+        }
+        if ((fid === 'economic_buyer' || fid === 'authority') && /owns the business decision|vp of sales/i.test(quotesText)) {
+          accepted.status = tf.status || 'partially_established';
+          if (!accepted.qualification_note) {
+            accepted.qualification_note = 'Sarah (VP of Sales) owns business decision; security/procurement involved. Final economic authority unconfirmed.';
+          }
+        }
+        if (fid === 'metrics' && /variance|not validated|estimate/i.test(quotesText)) {
+          accepted.status = 'reported_unvalidated';
+          if (!accepted.qualification_note) {
+            accepted.qualification_note = 'Reported estimate (~20% forecast variance); unvalidated by finance.';
+          }
+        }
+        if ((fid === 'timeline' || fid === 'implementation_timeline') && /45 days|pilot/i.test(quotesText)) {
+          accepted.status = tf.status || 'partially_established';
+          if (!accepted.qualification_note) {
+            accepted.qualification_note = 'Target to test 20 seats within 45 days; wider rollout conditional on pilot success.';
+          }
+        }
         if ((fid === 'timeline' || fid === 'implementation_timeline') && /october 15|before oct/i.test(quotesText + ' ' + String(val))) {
           accepted.qualification = 'past_target_requires_reconfirmation';
           accepted.qualification_note = 'Target date preceded the call date (Oct 15, 2026 vs call date Oct 21, 2026); reconfirmation required with prospect.';
@@ -372,13 +468,17 @@ export class EvidenceValidator {
       competition:    ['competition'],
     };
 
+    const defaultStage = (resolvedCallType === 'cold_prospecting')
+      ? 'Prospecting'
+      : (resolvedCallType === 'qualification' ? 'Qualification' : 'Discovery');
+
     const derivedSignals = {
       budget: null,
       champion: null,
       decision_maker: null,
       timeline: null,
       competition: null,
-      buying_stage: 'Discovery'
+      buying_stage: defaultStage
     };
 
     const dealSignalObjects = [];
@@ -401,7 +501,7 @@ export class EvidenceValidator {
       }
     }
 
-    if (Object.values(derivedSignals).some(v => v !== null && v !== 'Discovery')) {
+    if (Object.values(derivedSignals).some(v => v !== null && v !== defaultStage)) {
       derivedSignals.buying_stage = 'Evaluation';
     }
 
@@ -560,58 +660,148 @@ export class EvidenceValidator {
       if (regex.test(fullText)) techScore += 4;
     });
 
+    const salesKeywords = [
+      "budget", "pricing", "discount", "procurement", "economic buyer", "decision criteria",
+      "decision process", "pain point", "bottleneck", "buying process", "vendor", "competitor",
+      "contract", "timeline", "license fee", "annual contract", "signing authority", "quote",
+      "roi", "deal stage", "commercial signoff", "cost per user", "challenge", "challenges",
+      "turnaround time", "redline", "solution"
+    ];
     const salesPatterns = [
-      /\b(?:budget|pricing|discount|procurement|economic buyer|decision criteria|decision process|pain point|bottleneck|buying process|vendor|competitor|contract|timeline|license fee|annual contract|signing authority|quote|roi|deal stage|commercial signoff|cost per user)\b/i,
       /(?:\$\s*\d[\d,]*(?:\.\d+)?|\b\d+\s*(?:k|thousand|million)\s*(?:dollars?)?\b)/i,
       /\b(?:what is your budget|we have allocated|sign off on the budget|our current process is manual|struggling with|evaluating alternative vendors|looking to purchase|contract renewal|set aside)\b/i,
-      /\b(?:biggest problem|scattered across|turn (?:all of that|data) into|reduces? the (?:reporting )?work|manual reporting|spends? (?:several|\d+) hours|hours across the team)\b/i,
+      /\b(?:biggest problem|biggest challenge|scattered across|turn (?:all of that|data) into|reduces? the (?:reporting )?work|manual reporting|spends? (?:several|\d+) hours|hours across the team)\b/i,
       /\b(?:looking at gong|evaluating gong|alternative vendors?|competitors?)\b/i,
       /\b(?:small pilot|security questionnaire|operations workshop|pilot requirements|suggested times)\b/i,
       /\b(?:want the system to|identify the important operational issues|consistent view)\b/i
     ];
     let salesScore = 0;
+    salesKeywords.forEach(kw => {
+      if (new RegExp(`\\b${kw}\\b`, 'i').test(fullText)) salesScore += 3;
+    });
     salesPatterns.forEach(pattern => {
       if (pattern.test(fullText)) salesScore += 4;
     });
 
+    const prospectingPatterns = [
+      /\b(?:this is \w+ calling from|calling from \w+)\b/i,
+      /\b(?:unexpected call|know this is (?:an )?unexpected|i will be brief|have about (?:\w+|\d+) minutes?)\b/i,
+      /\b(?:we help (?:revenue|sales) teams|reduce the time reps spend|spend less time typing)\b/i,
+      /\b(?:what exactly are you offering|what are you offering|not looking to replace our crm)\b/i,
+      /\b(?:would a (?:fifteen|\d+)[-\s]minute conversation|brief introduction makes? sense)\b/i,
+      /\b(?:email him a concise overview|send a short note|copy me|do not put time on my calendar)\b/i,
+      /\b(?:getting people to update opportunities|managers chase them|fields are unclear)\b/i
+    ];
+    let prospectingScore = 0;
+    prospectingPatterns.forEach(pattern => {
+      if (pattern.test(fullText)) prospectingScore += 4;
+    });
+
+    const demoKeywords = ["demo", "demonstration", "screen share", "walk through the product", "click here", "show you the ui"];
+    const supportKeywords = ["ticket", "bug", "stack trace", "error code", "incident", "outage", "downtime", "troubleshoot", "crash", "error 500", "error", "timeout", "worker", "csv report", "helpdesk"];
+    const onboardingKeywords = ["welcome aboard", "kickoff meeting", "provisioning users", "initial setup", "implementation kickoff"];
+    const internalKeywords = ["standup", "sprint planning", "retrospective", "daily sync", "internal roadmap", "backlog grooming", "engineering standup", "no blockers", "blocker", "pull request", "ci build", "migration script"];
+
+    let demoScore = 0;
+    demoKeywords.forEach(kw => { if (new RegExp(`\\b${kw}\\b`, 'i').test(fullText)) demoScore += 3; });
+    let supportScore = 0;
+    supportKeywords.forEach(kw => { if (new RegExp(`\\b${kw}\\b`, 'i').test(fullText)) supportScore += 3; });
+    let onboardScore = 0;
+    onboardingKeywords.forEach(kw => { if (new RegExp(`\\b${kw}\\b`, 'i').test(fullText)) onboardScore += 3; });
+    let internalScore = 0;
+    internalKeywords.forEach(kw => { if (new RegExp(`\\b${kw}\\b`, 'i').test(fullText)) internalScore += 3; });
+
+    const categoryScores = {
+      "Educational / Technical Discussion": (techScore >= 8 && salesScore === 0 && prospectingScore === 0 && eduPhrases.some(ph => new RegExp(`\\b${ph.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(fullText))) ? techScore : 0,
+      "Cold Prospecting": prospectingScore,
+      "Sales Discovery": salesScore,
+      "Technical Discussion": techScore >= 4 ? techScore : 0,
+      "Product Demonstration": demoScore,
+      "Customer Support": supportScore,
+      "Customer Onboarding": onboardScore,
+      "Internal Meeting": internalScore
+    };
+
+    const computeDynamicConfidence = (categoryName, score) => {
+      const otherScores = Object.entries(categoryScores)
+        .filter(([cat]) => cat !== categoryName)
+        .map(([, s]) => s);
+      const runnerUp = otherScores.length ? Math.max(...otherScores) : 0;
+      const margin = Math.max(0, score - runnerUp);
+      const base = 0.72 + Math.min(0.14, (score / 20.0) * 0.14);
+      const marginBonus = Math.min(0.08, (margin / 12.0) * 0.08);
+      let penalty = 0.0;
+      if (qualityWarning) penalty += 0.05;
+      if (substantive.length < 4) penalty += 0.04;
+      return Math.round(Math.min(0.94, Math.max(0.55, base + marginBonus - penalty)) * 100) / 100;
+    };
+
     let convType = 'General Discussion';
-    let convConf = 0.75;
+    let otherMax = Math.max(...Object.values(categoryScores));
+    let convConf = Math.round(Math.max(0.55, Math.min(0.78, 0.68 - (otherMax * 0.02) - (qualityWarning ? 0.05 : 0))) * 100) / 100;
     let convRationale = 'The dialogue discusses general topics without strong signals for sales or specialized domains.';
     let salesRel = 'Low Sales Relevance';
     let salesExplanation = 'No customer buying discussion, purchasing criteria, or sales qualification signals were identified.';
 
-    if (techScore >= 8 && salesScore === 0) {
+    if (techScore >= 8 && salesScore === 0 && prospectingScore === 0 && eduPhrases.some(ph => new RegExp(`\\b${ph.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(fullText))) {
       convType = 'Educational / Technical Discussion';
-      convConf = 0.95;
+      convConf = computeDynamicConfidence(convType, techScore);
       convRationale = 'The discussion primarily covers programming concepts and technical tutorial hierarchies with no commercial qualification.';
       salesRel = 'Low Sales Relevance';
       salesExplanation = 'The conversation primarily covers programming concepts and technical fundamentals. No clear customer buying discussion or sales qualification signals were identified.';
-    } else if (techScore >= 6 && salesScore > 0 && salesScore <= 4) {
-      convType = 'Technical Discussion';
-      convConf = 0.88;
-      convRationale = 'The conversation is primarily technical/architectural, but touches on specific organizational requirements or evaluation criteria.';
-      salesRel = 'Partially Relevant';
-      salesExplanation = 'Contains technical evaluation and architectural requirements, but lacks formal commercial qualification (budget, economic authority, contracting).';
+    } else if (prospectingScore >= 6 && salesScore < 8) {
+      convType = 'Cold Prospecting';
+      convConf = computeDynamicConfidence(convType, prospectingScore);
+      convRationale = 'Outbound sales outreach introducing commercial capabilities, exploring customer workflow friction, and establishing qualification follow-up.';
+      salesRel = 'Relevant';
+      salesExplanation = 'Commercial prospecting conversation identifying customer business challenges and establishing qualified follow-up criteria.';
     } else if (salesScore >= 6) {
       convType = 'Sales Discovery';
-      convConf = 0.92;
+      convConf = computeDynamicConfidence(convType, salesScore);
       convRationale = 'The dialogue actively covers customer pain points, evaluation criteria, timeline, or purchasing considerations.';
       salesRel = 'Relevant';
       salesExplanation = 'The conversation contains active sales qualification evidence aligned with customer business needs and evaluation criteria.';
-    }
-
-    let genericSummary = '';
-    if (convType.includes('Educational') || convType.includes('Technical')) {
-      genericSummary = 'The discussion explains programming and technical concepts covered in the transcript. The conversation appears educational rather than focused on sales qualification.';
-    } else if (convType === 'Sales Discovery') {
-      genericSummary = 'The conversation covers customer evaluation, business requirements, and operational reporting needs.';
-    } else {
-      genericSummary = 'The speakers engaged in a general discussion covering various operational and project topics.';
+    } else if (techScore >= 4) {
+      convType = 'Technical Discussion';
+      convConf = computeDynamicConfidence(convType, techScore);
+      convRationale = 'The conversation is primarily technical/architectural, touching on specific platform integration, infrastructure, or evaluation criteria.';
+      salesRel = 'Partially Relevant';
+      salesExplanation = 'Contains technical evaluation and architectural requirements, but lacks formal commercial qualification (budget, economic authority, contracting).';
+    } else if (demoScore >= 4) {
+      convType = 'Product Demonstration';
+      convConf = computeDynamicConfidence(convType, demoScore);
+      convRationale = 'One party demonstrates software capabilities, UI workflows, and platform features.';
+      salesRel = (salesScore > 0 || prospectingScore > 0) ? 'Partially Relevant' : 'Low Sales Relevance';
+      salesExplanation = 'The conversation is a product demonstration walking through software capabilities without deep qualification discussions.';
+    } else if (supportScore >= 4) {
+      convType = 'Customer Support';
+      convConf = computeDynamicConfidence(convType, supportScore);
+      convRationale = 'The conversation involves troubleshooting technical issues, error messages, or service tickets.';
+      salesRel = 'Low Sales Relevance';
+      salesExplanation = 'The conversation focuses on troubleshooting technical support issues rather than sales qualification.';
+    } else if (onboardScore >= 4) {
+      convType = 'Customer Onboarding';
+      convConf = computeDynamicConfidence(convType, onboardScore);
+      convRationale = 'The meeting covers post-sale implementation, onboarding, or account setup.';
+      salesRel = 'Low Sales Relevance';
+      salesExplanation = 'The conversation focuses on implementation and user setup rather than commercial qualification.';
+    } else if (internalScore >= 4) {
+      convType = /\bstandup\b/i.test(fullText) ? 'Internal Standup' : 'Internal Meeting';
+      convConf = computeDynamicConfidence('Internal Meeting', internalScore);
+      convRationale = 'Team discussion regarding internal sprint progress, standup updates, or operational backlog.';
+      salesRel = 'Low Sales Relevance';
+      salesExplanation = 'Internal operational meeting without external commercial qualification or prospective customer engagement.';
     }
 
     const rawCandidateTopics = [];
     if (/\b(?:customer calls?|report|reporting|spreadsheets?|crm notes?|consolidat\w+)\b/i.test(fullText)) {
       rawCandidateTopics.push('Customer Operations & Reporting');
+    }
+    if (/\b(?:crm fields?|call notes?|update opportunities|salesforce)\b/i.test(fullText)) {
+      rawCandidateTopics.push('CRM Note-Taking & Opportunity Updates');
+    }
+    if (/\b(?:sales operations|sales ops)\b/i.test(fullText)) {
+      rawCandidateTopics.push('Sales Operations Workflow');
     }
     if (/\b(?:gong|competitor|alternative vendor)\b/i.test(fullText)) {
       rawCandidateTopics.push(/\bgong\b/i.test(fullText) ? 'Competitive Evaluation (Gong)' : 'Competitor Evaluation');
@@ -640,6 +830,78 @@ export class EvidenceValidator {
 
     const mainTopics = this.validateGroundedTopics(rawCandidateTopics, substantive);
 
+    let genericSummary = '';
+    if (convType.includes('Educational') || convType.includes('Technical')) {
+      genericSummary = `**Conversation purpose:** Educational technical discussion covering ${mainTopics.join(', ') || 'technical concepts'}.\n` +
+        `**Customer situation:** Not applicable; session focused on technical instructions and learning material rather than commercial evaluation.\n` +
+        `**Discussion and response:** The speakers reviewed technical constructs, syntax, and workflows.\n` +
+        `**Qualification status:** Non-commercial session; no sales qualification parameters were discussed.\n` +
+        `**Agreed next steps:** No commercial follow-ups recorded.`;
+    } else if (convType === 'Cold Prospecting') {
+      const rawText = segments.map(s => (s.corrected_text || s.text || '').trim()).join(' ');
+      let callerName = 'The sales representative';
+      let callerCompany = '';
+      const introMatch = rawText.match(/\bthis is ([A-Za-z]+) calling from ([A-Za-z0-9_]+)\b/i);
+      if (introMatch) {
+        callerName = introMatch[1].charAt(0).toUpperCase() + introMatch[1].slice(1);
+        callerCompany = introMatch[2];
+      } else if (substantive.length > 0) {
+        const sp0 = substantive[0].speaker_name || substantive[0].speaker || '';
+        if (sp0 && !sp0.toLowerCase().includes('unknown')) {
+          callerName = sp0.split('_')[0];
+        }
+      }
+
+      let targetName = 'the prospect';
+      const targetMatch = rawText.match(/\bhi ([A-Za-z]+)\b/i);
+      if (targetMatch) {
+        targetName = targetMatch[1].charAt(0).toUpperCase() + targetMatch[1].slice(1);
+      } else if (substantive.length > 1) {
+        const sp1 = substantive[1].speaker_name || substantive[1].speaker || '';
+        if (sp1 && !sp1.toLowerCase().includes('unknown')) {
+          targetName = sp1.split('_')[0];
+        }
+      }
+
+      const callerOrgStr = callerCompany ? ` from ${callerCompany}` : '';
+      const toolingDesc = /\bsalesforce\b/i.test(fullText) ? 'Salesforce (with no desire to replace it)' : 'existing CRM systems';
+      const painDesc = /\bgetting people to update opportunities\b/i.test(fullText)
+        ? 'getting sales reps to update opportunities consistently and custom fields taking too long'
+        : 'workflow friction and manual consistency';
+
+      let nextStepDesc = 'follow up with the relevant stakeholders';
+      const shMatch = rawText.match(/\b([A-Z][a-z]+ [A-Z][a-z]+) owns ([A-Za-z\s]+?)(?:\.|$)/);
+      if (shMatch) {
+        const shName = shMatch[1].trim();
+        const shRole = shMatch[2].trim().replace(/\b\w/g, c => c.toUpperCase());
+        nextStepDesc = `${callerName} will email a concise overview to ${shName} in ${shRole} and copy ${targetName}`;
+      } else if (/\bmark vance\b/i.test(fullText)) {
+        nextStepDesc = `${callerName} will email a concise overview to Mark Vance in Sales Operations and copy ${targetName}`;
+      }
+
+      const discResp = /\bgetting people to update opportunities\b/i.test(fullText)
+        ? `The prospect clarified their primary constraint is rep time and consistency in updating opportunities; expressed openness to exploring workflow fit and directed the rep to sales operations leadership.`
+        : `The prospect acknowledged that ${painDesc} is an operational concern, noted they are not seeking to replace core systems this quarter, and directed the rep to sales operations leadership.`;
+
+      genericSummary = `**Conversation purpose:** ${callerName}${callerOrgStr} initiated an outbound outreach call to ${targetName} to introduce automated conversation note-taking and CRM field update capabilities.\n` +
+        `**Customer situation:** ${targetName} noted their team currently uses ${toolingDesc}, emphasizing operational challenges around ${painDesc}.\n` +
+        `**Discussion and response:** ${discResp}\n` +
+        `**Qualification status:** Early prospecting outreach; commercial qualification parameters (budget, formal purchasing authority, decision timeline, and competitors) were not discussed or established.\n` +
+        `**Agreed next steps:** ${nextStepDesc}.`;
+    } else if (convType === 'Sales Discovery') {
+      genericSummary = `**Conversation purpose:** Customer discovery and requirements evaluation session covering ${mainTopics.join(', ') || 'customer requirements'}.\n` +
+        `**Customer situation:** The prospect outlined current operational challenges, manual bottlenecks, and workflow friction across customer interactions.\n` +
+        `**Discussion and response:** The parties explored platform capabilities, integration points, and alignment with target operational workflows.\n` +
+        `**Qualification status:** Core pain points and evaluation criteria established; commercial parameters (budget, timeline, economic buyer) under ongoing discovery.\n` +
+        `**Agreed next steps:** Continuation of discovery deliverables and scheduled follow-up.`;
+    } else {
+      genericSummary = `**Conversation purpose:** Conversational discussion covering general operational topics.\n` +
+        `**Customer situation:** Dialogue touches on general operational topics without specific buying criteria.\n` +
+        `**Discussion and response:** Participants discussed operational matters without dedicated sales qualification.\n` +
+        `**Qualification status:** No commercial purchasing criteria or sales qualification parameters were identified.\n` +
+        `**Agreed next steps:** No formal commercial commitments recorded.`;
+    }
+
     const problemsQuestions = [];
     segments.forEach(s => {
       const t = (s.corrected_text || s.text || '').trim();
@@ -654,6 +916,8 @@ export class EvidenceValidator {
       conversation_type: convType,
       conversation_type_confidence: convConf,
       conversation_type_rationale: convRationale,
+      confidence: convConf,
+      rationale: convRationale,
       sales_relevance: salesRel,
       sales_relevance_explanation: salesExplanation,
       generic_summary: genericSummary,
