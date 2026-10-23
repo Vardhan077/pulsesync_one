@@ -306,6 +306,9 @@ export default function Customers({
       if (playbookRes.ok) {
         const play = await playbookRes.json();
         setPlaybookData(play);
+        if (play?.playbook) {
+          setSelectedPlaybook(play.playbook);
+        }
       }
       if (historyRes.ok) {
         const hist = await historyRes.json();
@@ -439,15 +442,41 @@ export default function Customers({
     }
   };
 
+  const handlePlaybookChange = async (playbookName) => {
+    setSelectedPlaybook(playbookName);
+    if (!selectedCompanyId) return;
+    try {
+      const [pRes, hRes, cRes] = await Promise.all([
+        fetch(`${API_URL}/api/customers/${selectedCompanyId}/playbook?playbook=${encodeURIComponent(playbookName)}`),
+        fetch(`${API_URL}/api/customers/${selectedCompanyId}/playbook/history?playbook=${encodeURIComponent(playbookName)}`),
+        fetch(`${API_URL}/api/customers/${selectedCompanyId}/playbook/coverage?playbook=${encodeURIComponent(playbookName)}`)
+      ]);
+      if (pRes.ok) {
+        const pData = await pRes.json();
+        setPlaybookData(pData);
+      }
+      if (hRes.ok) {
+        const hData = await hRes.json();
+        setPlaybookHistory(hData);
+      }
+      if (cRes.ok) {
+        const cData = await cRes.json();
+        setPlaybookCoverage(cData);
+      }
+    } catch (err) {
+      console.error("Failed to load playbook data:", err);
+    }
+  };
+
   const handleCreateCommitment = async (e) => {
     e.preventDefault();
     if (!newCommitmentData.task.trim() || savingCommitment) return;
     setSavingCommitment(true);
     try {
       const payload = {
-        task: newCommitmentData.task,
-        owner: newCommitmentData.owner || (newCommitmentData.type === "customer" ? "Priya" : "Sarah Chen"),
-        due_date: newCommitmentData.due_date || "Next meeting",
+        task: newCommitmentData.task.trim(),
+        owner: newCommitmentData.owner?.trim() || "Unassigned",
+        due_date: newCommitmentData.due_date?.trim() || null,
         type: newCommitmentData.type,
         meeting_id: meetingsHistory[0]?.id || null
       };
@@ -699,101 +728,232 @@ ${prepNotes || "No agenda notes drafted."}
     (s.corrected_text || s.text || "").toLowerCase().includes(transcriptSearch.toLowerCase())
   );
 
-  // Consolidated Multi-Call Intelligence Table Items (8 MEDDIC parameters grounded in sessions)
-  const getConsolidatedAccountRows = () => {
-    const call01 = meetingsHistory[1] || meetingsHistory[0];
-    const call02 = meetingsHistory[0] || meetingsHistory[1];
+  const formatRelativeTime = (dateStr) => {
+    if (!dateStr) return "No activity";
+    try {
+      const date = new Date(dateStr);
+      const now = new Date();
+      const diffMs = now - date;
+      const diffSec = Math.floor(diffMs / 1000);
+      const diffMin = Math.floor(diffSec / 60);
+      const diffHours = Math.floor(diffMin / 60);
+      const diffDays = Math.floor(diffHours / 24);
 
-    const allRows = [
-      {
-        id: "metric",
-        field: "Metric",
-        value: "45 sales reps, targeting 30% reduction in manual CRM entry time",
-        status: "Confirmed",
-        statusType: "confirmed",
-        sourceLabel: "Call 01 — 06:14",
-        meetingId: call01?.id,
-        meeting: call01
-      },
-      {
-        id: "econ_buyer",
-        field: "Economic Buyer",
-        value: "VP Finance (unverified, mentioned in Call 01)",
-        status: "Needs review",
-        statusType: "needs_review",
-        sourceLabel: "Call 01 — 08:10",
-        meetingId: call01?.id,
-        meeting: call01
-      },
-      {
-        id: "decision_criteria",
-        field: "Decision Criteria",
-        value: "HubSpot bidirectional sync, automated MEDDIC tagging, low adoption barrier",
-        status: "Confirmed",
-        statusType: "confirmed",
-        sourceLabel: "Call 02 — 02:45",
-        meetingId: call02?.id,
-        meeting: call02
-      },
-      {
-        id: "decision_process",
-        field: "Decision Process",
-        value: "Security review → Ops pilot workshop → VP Finance sign-off",
-        status: "Needs review",
-        statusType: "needs_review",
-        sourceLabel: "Call 02 — 15:20",
-        meetingId: call02?.id,
-        meeting: call02
-      },
-      {
-        id: "identify_pain",
-        field: "Identify Pain",
-        value: "Gong rep adoption low, manual CRM field hygiene failing across 45 reps",
-        status: "Confirmed",
-        statusType: "confirmed",
-        sourceLabel: "Call 01 — 03:15",
-        meetingId: call01?.id,
-        meeting: call01
-      },
-      {
-        id: "champion",
-        field: "Champion",
-        value: "Priya Sharma (VP Sales, actively driving evaluation)",
-        status: "Confirmed",
-        statusType: "confirmed",
-        sourceLabel: "Call 01 — 01:20",
-        meetingId: call01?.id,
-        meeting: call01
-      },
-      {
-        id: "budget",
-        field: "Budget",
-        value: "$18,500/year allocated tooling budget (was unconfirmed in Call 01)",
-        status: "Changed",
-        statusType: "changed",
-        sourceLabel: "Call 02 — 04:12",
-        meetingId: call02?.id,
-        meeting: call02
-      },
-      {
-        id: "timeline",
-        field: "Timeline",
-        value: "Delayed to November (previously targeted before Oct 15)",
-        status: "Changed",
-        statusType: "changed",
-        sourceLabel: "Call 02 — 11:30",
-        meetingId: call02?.id,
-        meeting: call02
+      if (diffDays > 30) return date.toLocaleDateString();
+      if (diffDays > 0) return `${diffDays}d ago`;
+      if (diffHours > 0) return `${diffHours}h ago`;
+      if (diffMin > 0) return `${diffMin}m ago`;
+      return "Just now";
+    } catch {
+      return "Active";
+    }
+  };
+
+  const getAllAccountRows = () => {
+    if (playbookData?.properties && playbookData.properties.length > 0) {
+      return playbookData.properties.map(prop => {
+        const history = playbookHistory?.[prop.field_name] || [];
+        const hasHistory = history.length > 1;
+        
+        let statusType = "confirmed";
+        let status = "Confirmed";
+        
+        const rawStatus = (prop.status || '').toLowerCase();
+
+        if (!prop.current_value || prop.current_value === '—' || rawStatus === 'missing' || rawStatus === 'not_mentioned') {
+          statusType = "missing";
+          status = "Not established";
+        } else if (hasHistory) {
+          const uniqueValues = new Set(history.map(h => String(h.value).trim().toLowerCase()));
+          if (uniqueValues.size > 1) {
+            statusType = "changed";
+            status = "Changed";
+          } else if (rawStatus === 'partially_established') {
+            statusType = "partially_established";
+            status = "Partially established";
+          } else if (rawStatus === 'reported_unvalidated') {
+            statusType = "reported_unvalidated";
+            status = "Reported (unvalidated)";
+          } else if (rawStatus === 'awaiting_verification') {
+            statusType = "awaiting_verification";
+            status = "Awaiting verification";
+          } else if (prop.confidence && prop.confidence < 70) {
+            statusType = "needs_review";
+            status = "Needs review";
+          }
+        } else if (rawStatus === 'partially_established') {
+          statusType = "partially_established";
+          status = "Partially established";
+        } else if (rawStatus === 'reported_unvalidated') {
+          statusType = "reported_unvalidated";
+          status = "Reported (unvalidated)";
+        } else if (rawStatus === 'awaiting_verification') {
+          statusType = "awaiting_verification";
+          status = "Awaiting verification";
+        } else if (prop.confidence && prop.confidence < 70) {
+          statusType = "needs_review";
+          status = "Needs review";
+        }
+
+        const sourceMeeting = meetingsHistory.find(m => m.id === prop.meeting_id) || (prop.meeting_id ? { id: prop.meeting_id, title: prop.meeting_title } : meetingsHistory[0]);
+        const sourceLabel = prop.meeting_title 
+          ? prop.meeting_title 
+          : (sourceMeeting ? `${sourceMeeting.title || "Meeting"}` : "No verified source");
+
+        return {
+          id: prop.field_name,
+          field: prop.label || prop.field_name,
+          value: prop.current_value || "No evidence found across recorded calls",
+          status,
+          statusType,
+          sourceLabel,
+          meetingId: prop.meeting_id,
+          meeting: sourceMeeting,
+          confidence: prop.confidence,
+          evidence: prop.evidence
+        };
+      });
+    }
+
+    if (customerIntelligence?.facts) {
+      const factKeys = Object.keys(customerIntelligence.facts);
+      if (factKeys.length > 0) {
+        return factKeys.map(key => {
+          const fact = customerIntelligence.facts[key];
+          const label = key.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+          const isMissing = !fact || !fact.value;
+          const statusType = isMissing ? "missing" : (fact.status === "verified" ? "confirmed" : "needs_review");
+          const sourceMeeting = meetingsHistory.find(m => m.id === fact?.source_meeting_id) || (fact?.source_meeting_id ? { id: fact.source_meeting_id, title: fact.source_meeting_title } : meetingsHistory[0]);
+          return {
+            id: key,
+            field: label,
+            value: isMissing ? "No evidence found across recorded calls" : fact.value,
+            status: isMissing ? "Not established" : (fact.status === "verified" ? "Confirmed" : "Needs review"),
+            statusType,
+            sourceLabel: fact?.source_meeting_title || (sourceMeeting ? sourceMeeting.title : "No verified source"),
+            meetingId: fact?.source_meeting_id,
+            meeting: sourceMeeting,
+            confidence: fact?.confidence || 0,
+            evidence: fact?.evidence
+          };
+        });
       }
-    ];
+    }
 
+    return [];
+  };
+
+  const getConsolidatedAccountRows = () => {
+    const allRows = getAllAccountRows();
     if (intelligenceFilter === "changed") {
       return allRows.filter(r => r.statusType === "changed");
     }
     if (intelligenceFilter === "needs_review") {
-      return allRows.filter(r => r.statusType === "needs_review");
+      return allRows.filter(r => ["needs_review", "partially_established", "reported_unvalidated", "awaiting_verification", "missing"].includes(r.statusType));
     }
     return allRows;
+  };
+
+  const getPrioritySignals = () => {
+    const signals = [];
+    
+    // 1. Budget Signal
+    const budgetProp = playbookData?.properties?.find(p => p.field_name === 'budget' || p.field_name === 'project_budget') || null;
+    const budgetFact = customerIntelligence?.facts?.budget || null;
+    const budgetVal = budgetProp?.current_value || budgetFact?.value || selectedCompanyData?.company?.budget || null;
+    const budgetMeeting = meetingsHistory.find(m => m.id === (budgetProp?.meeting_id || budgetFact?.source_meeting_id)) || meetingsHistory[0];
+
+    if (budgetVal && String(budgetVal).toLowerCase() !== 'null' && String(budgetVal).trim() !== '' && String(budgetVal) !== '—') {
+      const isEarmarked = /earmark|conditional|pending/i.test(String(budgetVal));
+      signals.push({
+        type: isEarmarked ? "warning" : "positive",
+        title: isEarmarked ? "Budget earmarked (conditional)" : "Budget identified",
+        icon: isEarmarked ? "alert" : "check",
+        description: isEarmarked 
+          ? `Budget earmarked for sales productivity tools under CRO sponsorship; final funding depends on business case.`
+          : `Allocated budget of ${budgetVal} identified in meeting records.`,
+        sourceLabel: budgetMeeting ? `${budgetMeeting.title}` : "Verified records",
+        meeting: budgetMeeting
+      });
+    } else {
+      signals.push({
+        type: "neutral",
+        title: "Budget not yet identified",
+        icon: "info",
+        description: "No verified budget figure has been discussed or confirmed in recorded calls.",
+        sourceLabel: "Awaiting discussion",
+        meeting: null
+      });
+    }
+
+    // 2. Decision Maker / Economic Buyer Signal
+    const dmProp = playbookData?.properties?.find(p => p.field_name === 'economic_buyer' || p.field_name === 'authority' || p.field_name === 'decision_maker') || null;
+    const dmFact = customerIntelligence?.facts?.decision_maker || null;
+    const dmVal = dmProp?.current_value || dmFact?.value || selectedCompanyData?.company?.decision_maker || null;
+    const dmMeeting = meetingsHistory.find(m => m.id === (dmProp?.meeting_id || dmFact?.source_meeting_id)) || meetingsHistory[0];
+
+    if (dmVal && String(dmVal).toLowerCase() !== 'null' && String(dmVal).trim() !== '' && String(dmVal) !== '—') {
+      const isSarahDecisionMaker = /sarah/i.test(String(dmVal));
+      signals.push({
+        type: "positive",
+        title: isSarahDecisionMaker ? "Business decision maker identified" : "Decision maker identified",
+        icon: "check",
+        description: isSarahDecisionMaker
+          ? `Sarah (VP of Sales) owns business decision; security & procurement involved. Final economic authority unconfirmed.`
+          : `Economic decision authority mapped to ${dmVal}.`,
+        sourceLabel: dmMeeting ? `${dmMeeting.title}` : "Recorded calls",
+        meeting: dmMeeting
+      });
+    } else {
+      signals.push({
+        type: "warning",
+        title: "Decision maker missing",
+        icon: "alert",
+        description: "Economic Buyer or budget approval authority has not been confirmed in recorded calls.",
+        sourceLabel: "Requires discovery",
+        meeting: null
+      });
+    }
+
+    // 3. Timeline / Risks Signal
+    const timelineProp = playbookData?.properties?.find(p => p.field_name === 'timeline' || p.field_name === 'implementation_timeline') || null;
+    const timelineFact = customerIntelligence?.facts?.timeline || null;
+    const timelineVal = timelineProp?.current_value || timelineFact?.value || null;
+    const timelineMeeting = meetingsHistory.find(m => m.id === (timelineProp?.meeting_id || timelineFact?.source_meeting_id)) || meetingsHistory[0];
+
+    if (timelineVal && String(timelineVal).toLowerCase() !== 'null' && String(timelineVal).trim() !== '' && String(timelineVal) !== '—') {
+      const isPilot = /45 days|pilot/i.test(String(timelineVal));
+      signals.push({
+        type: "positive",
+        title: isPilot ? "Pilot timeline targeted" : "Timeline targeted",
+        icon: "calendar",
+        description: isPilot
+          ? `Prospect stated target to test 20 seats within 45 days (rollout conditional on pilot success).`
+          : `Target implementation timeline discussed: ${timelineVal}.`,
+        sourceLabel: timelineMeeting ? `${timelineMeeting.title}` : "Recorded calls",
+        meeting: timelineMeeting
+      });
+    } else if (risksList && risksList.length > 0) {
+      signals.push({
+        type: "warning",
+        title: "Identified deal risk",
+        icon: "alert",
+        description: `${risksList.length} potential risk${risksList.length > 1 ? 's' : ''} detected across conversations.`,
+        sourceLabel: `${risksList[0].meeting_title || 'Meeting records'}`,
+        meeting: meetingsHistory.find(m => m.id === risksList[0].meeting_id) || meetingsHistory[0]
+      });
+    } else {
+      signals.push({
+        type: "neutral",
+        title: "Timeline pending",
+        icon: "calendar",
+        description: "Implementation timeline and milestones have not yet been established.",
+        sourceLabel: "Awaiting qualification",
+        meeting: null
+      });
+    }
+
+    return signals;
   };
 
   const consolidatedRows = getConsolidatedAccountRows();
@@ -1074,12 +1234,12 @@ ${prepNotes || "No agenda notes drafted."}
                   {/* Left: Avatar, Title, Favorite Star, Subtitle info */}
                   <div className="flex items-center gap-3.5">
                     <div className="h-11 w-11 rounded-xl bg-[#F1F5F9] border border-[#CBD5E1] text-[#1E293B] flex items-center justify-center font-extrabold text-sm tracking-wider shadow-2xs">
-                      {selectedCompanyData.company.name?.slice(0, 2).toUpperCase() || "NS"}
+                      {selectedCompanyData.company.name?.slice(0, 2).toUpperCase() || "AC"}
                     </div>
                     <div>
                       <div className="flex items-center gap-2">
                         <h1 className="text-xl font-extrabold text-[#0F172A] tracking-tight">
-                          {selectedCompanyData.company.name || "NorthStar Inc."}
+                          {selectedCompanyData.company.name || "Unnamed Account"}
                         </h1>
                         <button
                           onClick={() => togglePinCompany(selectedCompanyData.company.id, selectedCompanyData.company.name)}
@@ -1092,16 +1252,23 @@ ${prepNotes || "No agenda notes drafted."}
 
                       {/* Subtitle Line with Bullet Points */}
                       <div className="flex items-center gap-2 text-xs text-[#64748B] font-medium mt-1 flex-wrap">
-                        <span>San Francisco, CA</span>
+                        <span>{selectedCompanyData.company.location || selectedCompanyData.company.website || "Location not specified"}</span>
                         <span>•</span>
-                        <span>{selectedCompanyData.company.industry || "Fintech"}</span>
+                        <span>{selectedCompanyData.company.industry || "Industry not specified"}</span>
                         <span>•</span>
-                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-semibold">
-                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                          HubSpot CRM Connected
-                        </span>
+                        {selectedCompanyData.company.crm_account ? (
+                          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-semibold">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                            CRM Synced ({selectedCompanyData.company.crm_account})
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-slate-50 text-slate-600 border border-slate-200 text-[11px] font-semibold">
+                            <span className="h-1.5 w-1.5 rounded-full bg-slate-400" />
+                            CRM Not Connected
+                          </span>
+                        )}
                         <span>•</span>
-                        <span>Owner: <strong className="text-[#334155]">{selectedCompanyData.company.crm_owner || "Sarah Chen"}</strong></span>
+                        <span>Owner: <strong className="text-[#334155]">{selectedCompanyData.company.crm_owner || selectedCompanyData.company.account_owner || "Unassigned"}</strong></span>
                       </div>
                     </div>
                   </div>
@@ -1113,7 +1280,7 @@ ${prepNotes || "No agenda notes drafted."}
                     <div className="flex flex-col items-end">
                       <span className="text-[9px] font-bold text-[#94A3B8] uppercase tracking-wider mb-0.5">Stage</span>
                       <select
-                        value={selectedCompanyData.company.deal_stage || "Negotiation"}
+                        value={selectedCompanyData.company.deal_stage || "Discovery"}
                         onChange={(e) => handleStageChange(e.target.value)}
                         className="bg-[#F8FAFC] border border-[#CBD5E1] text-[#0F172A] text-xs font-bold rounded-lg px-2.5 py-1.5 outline-none hover:border-[#10B981] focus:border-[#10B981] transition cursor-pointer shadow-3xs"
                       >
@@ -1131,7 +1298,7 @@ ${prepNotes || "No agenda notes drafted."}
                     <div className="flex flex-col items-center px-3 border-l border-[#F1F5F9]">
                       <span className="text-[9px] font-bold text-[#94A3B8] uppercase tracking-wider mb-0.5">Calls</span>
                       <span className="text-xs font-extrabold text-[#0F172A]">
-                        {meetingsHistory.length || 2} calls
+                        {meetingsHistory.length} {meetingsHistory.length === 1 ? 'call' : 'calls'}
                       </span>
                     </div>
 
@@ -1139,7 +1306,7 @@ ${prepNotes || "No agenda notes drafted."}
                     <div className="flex flex-col items-center px-3 border-l border-[#F1F5F9]">
                       <span className="text-[9px] font-bold text-[#94A3B8] uppercase tracking-wider mb-0.5">Last Activity</span>
                       <span className="text-xs font-extrabold text-[#0F172A]">
-                        {meetingsHistory[0]?.created_at ? "2h ago" : "Active"}
+                        {meetingsHistory[0]?.created_at ? formatRelativeTime(meetingsHistory[0].created_at) : "No activity"}
                       </span>
                     </div>
 
@@ -1200,79 +1367,50 @@ ${prepNotes || "No agenda notes drafted."}
                   <span className="text-[10px] font-extrabold uppercase tracking-wider">Account Intelligence Summary</span>
                 </div>
                 <p className="text-xs text-[#064E3B] font-medium leading-relaxed max-w-5xl">
-                  {aiBrief || "NorthStar is evaluating PulseSync to replace Gong for their 45-rep sales team. Key driver is automated MEDDIC CRM hygiene. Evaluation is progressing well but decision timeline shifted from October to November due to security review."}
+                  {aiBrief || (selectedCompanyData?.company?.name 
+                    ? `Account record active for ${selectedCompanyData.company.name}. No account intelligence summary compiled yet. Transcribe and review meetings to compile automated deal intelligence.`
+                    : "No account intelligence summary compiled yet. Transcribe and review meetings to compile automated deal intelligence.")}
                 </p>
               </div>
 
-              {/* 3 Priority Signals Grid */}
+              {/* Priority Signals Grid */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5 pt-1">
-                
-                {/* Signal 1: Timeline needs reconfirmation */}
-                <div className="bg-white border border-[#FDE68A] p-3.5 rounded-lg shadow-2xs flex flex-col justify-between gap-2">
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-1.5 text-amber-700 font-extrabold text-xs">
-                      <AlertTriangle size={13} className="text-amber-500" />
-                      <span>Timeline needs reconfirmation</span>
+                {getPrioritySignals().map((sig, sIdx) => {
+                  const isPositive = sig.type === "positive";
+                  const isWarning = sig.type === "warning";
+                  const borderClass = isPositive ? "border-[#A7F3D0]" : isWarning ? "border-[#FDE68A]" : "border-[#E2E8F0]";
+                  const textHeaderClass = isPositive ? "text-emerald-800" : isWarning ? "text-amber-700" : "text-slate-700";
+                  const dividerClass = isPositive ? "border-[#D1FAE5]" : isWarning ? "border-[#FEF3C7]" : "border-[#F1F5F9]";
+                  
+                  return (
+                    <div key={sIdx} className={`bg-white border ${borderClass} p-3.5 rounded-lg shadow-2xs flex flex-col justify-between gap-2`}>
+                      <div className="space-y-1">
+                        <div className={`flex items-center gap-1.5 ${textHeaderClass} font-extrabold text-xs`}>
+                          {isPositive && <CheckCircle2 size={13} className="text-emerald-600" />}
+                          {isWarning && <AlertTriangle size={13} className="text-amber-500" />}
+                          {!isPositive && !isWarning && <HelpCircle size={13} className="text-slate-400" />}
+                          <span>{sig.title}</span>
+                        </div>
+                        <p className="text-[11px] text-[#475569] font-medium leading-normal">
+                          {sig.description}
+                        </p>
+                      </div>
+                      <div className={`pt-1 border-t ${dividerClass} flex items-center justify-between`}>
+                        {sig.meeting ? (
+                          <button
+                            onClick={() => openTranscriptDrawer(sig.meeting)}
+                            className="text-[10px] font-bold text-[#0D9488] hover:underline flex items-center gap-1"
+                          >
+                            <span>{sig.sourceLabel}</span>
+                            <ChevronRight size={11} />
+                          </button>
+                        ) : (
+                          <span className="text-[10px] font-semibold text-[#94A3B8]">{sig.sourceLabel}</span>
+                        )}
+                      </div>
                     </div>
-                    <p className="text-[11px] text-[#475569] font-medium leading-normal">
-                      Target date passed (Call 02). Oct 15 date missed without new date set.
-                    </p>
-                  </div>
-                  <div className="pt-1 border-t border-[#FEF3C7] flex items-center justify-between">
-                    <button
-                      onClick={() => openTranscriptDrawer(meetingsHistory[0])}
-                      className="text-[10px] font-bold text-[#0D9488] hover:underline flex items-center gap-1"
-                    >
-                      <span>Call 02 — 3d ago</span>
-                      <ChevronRight size={11} />
-                    </button>
-                  </div>
-                </div>
-
-                {/* Signal 2: Decision maker missing */}
-                <div className="bg-white border border-[#FDE68A] p-3.5 rounded-lg shadow-2xs flex flex-col justify-between gap-2">
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-1.5 text-amber-700 font-extrabold text-xs">
-                      <AlertTriangle size={13} className="text-amber-500" />
-                      <span>Decision maker missing</span>
-                    </div>
-                    <p className="text-[11px] text-[#475569] font-medium leading-normal">
-                      Economic Buyer not confirmed in Call 01 or Call 02. VP Sales Priya mentioned but not verified.
-                    </p>
-                  </div>
-                  <div className="pt-1 border-t border-[#FEF3C7] flex items-center justify-between">
-                    <button
-                      onClick={() => openTranscriptDrawer(meetingsHistory[1] || meetingsHistory[0])}
-                      className="text-[10px] font-bold text-[#0D9488] hover:underline flex items-center gap-1"
-                    >
-                      <span>Call 01, Call 02</span>
-                      <ChevronRight size={11} />
-                    </button>
-                  </div>
-                </div>
-
-                {/* Signal 3: Budget identified */}
-                <div className="bg-white border border-[#A7F3D0] p-3.5 rounded-lg shadow-2xs flex flex-col justify-between gap-2">
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-1.5 text-emerald-800 font-extrabold text-xs">
-                      <CheckCircle2 size={13} className="text-emerald-600" />
-                      <span>Budget identified</span>
-                    </div>
-                    <p className="text-[11px] text-[#475569] font-medium leading-normal">
-                      Annual tooling budget of $18,500 confirmed in Call 02 with 15% expansion room.
-                    </p>
-                  </div>
-                  <div className="pt-1 border-t border-[#D1FAE5] flex items-center justify-between">
-                    <button
-                      onClick={() => openTranscriptDrawer(meetingsHistory[0])}
-                      className="text-[10px] font-bold text-[#0D9488] hover:underline flex items-center gap-1"
-                    >
-                      <span>Call 02 — 3d ago</span>
-                      <ChevronRight size={11} />
-                    </button>
-                  </div>
-                </div>
-
+                  );
+                })}
               </div>
 
             </div>
@@ -1309,7 +1447,7 @@ ${prepNotes || "No agenda notes drafted."}
                               : "text-[#64748B] hover:text-[#0F172A]"
                           }`}
                         >
-                          All fields (8)
+                          All fields ({getAllAccountRows().length})
                         </button>
                         <button
                           onClick={() => setIntelligenceFilter("changed")}
@@ -1319,7 +1457,7 @@ ${prepNotes || "No agenda notes drafted."}
                               : "text-[#64748B] hover:text-[#0F172A]"
                           }`}
                         >
-                          Changed (2)
+                          Changed ({getAllAccountRows().filter(r => r.statusType === 'changed').length})
                         </button>
                         <button
                           onClick={() => setIntelligenceFilter("needs_review")}
@@ -1330,14 +1468,14 @@ ${prepNotes || "No agenda notes drafted."}
                           }`}
                         >
                           <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-                          Needs review (2)
+                          Needs review ({getAllAccountRows().filter(r => ['needs_review', 'partially_established', 'reported_unvalidated', 'awaiting_verification', 'missing'].includes(r.statusType)).length})
                         </button>
                       </div>
 
                       {/* Playbook selector dropdown */}
                       <select
                         value={selectedPlaybook}
-                        onChange={(e) => setSelectedPlaybook(e.target.value)}
+                        onChange={(e) => handlePlaybookChange(e.target.value)}
                         className="bg-white border border-[#CBD5E1] text-[#0F172A] text-[11px] font-bold rounded-lg px-2.5 py-1 outline-none hover:border-[#10B981] transition cursor-pointer shadow-3xs"
                       >
                         <option value="MEDDIC">MEDDIC</option>
@@ -1356,54 +1494,89 @@ ${prepNotes || "No agenda notes drafted."}
                         <tr className="border-b border-[#E5E7EB] text-[9.5px] font-bold text-[#64748B] uppercase tracking-wider bg-[#F8FAFC]">
                           <th className="py-2.5 px-4 w-40">Field</th>
                           <th className="py-2.5 px-4">Current Value</th>
-                          <th className="py-2.5 px-3 w-32">Status</th>
+                          <th className="py-2.5 px-3 w-36">Status</th>
                           <th className="py-2.5 px-4 w-36 text-right">Source</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#F1F5F9] font-medium text-[#475569]">
-                        {consolidatedRows.map((row) => (
-                          <tr key={row.id} className="hover:bg-[#FAFBFB] transition-colors border-b border-[#F1F5F9]">
-                            <td className="py-3 px-4 text-[#0F172A] font-extrabold">{row.field}</td>
-                            <td className="py-3 px-4 text-[#334155] font-semibold text-[11.5px] leading-relaxed">
-                              {row.value}
-                            </td>
-                            <td className="py-3 px-3">
-                              {row.statusType === "confirmed" && (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                                  <Check size={10} />
-                                  <span>Confirmed</span>
-                                </span>
-                              )}
-                              {row.statusType === "changed" && (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-sky-50 text-sky-700 border border-sky-200">
-                                  <Activity size={10} />
-                                  <span>Changed</span>
-                                </span>
-                              )}
-                              {row.statusType === "needs_review" && (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
-                                  <AlertTriangle size={10} />
-                                  <span>Needs review</span>
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-3 px-4 text-right">
-                              <button
-                                onClick={() => openTranscriptDrawer(row.meeting || meetingsHistory[0])}
-                                className="text-[11px] font-bold text-[#0D9488] hover:underline inline-flex items-center gap-1"
-                              >
-                                <span>{row.sourceLabel}</span>
-                              </button>
+                        {consolidatedRows.length === 0 ? (
+                          <tr>
+                            <td colSpan={4} className="py-8 text-center text-xs text-[#94A3B8] italic">
+                              No playbook fields found or no evidence recorded yet for this filter.
                             </td>
                           </tr>
-                        ))}
+                        ) : (
+                          consolidatedRows.map((row) => (
+                            <tr key={row.id} className="hover:bg-[#FAFBFB] transition-colors border-b border-[#F1F5F9]">
+                              <td className="py-3 px-4 text-[#0F172A] font-extrabold">{row.field}</td>
+                              <td className="py-3 px-4 text-[#334155] font-semibold text-[11.5px] leading-relaxed">
+                                {row.value}
+                              </td>
+                              <td className="py-3 px-3">
+                                {row.statusType === "confirmed" && (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                    <Check size={10} />
+                                    <span>Confirmed</span>
+                                  </span>
+                                )}
+                                {row.statusType === "partially_established" && (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200">
+                                    <Activity size={10} />
+                                    <span>Partially established</span>
+                                  </span>
+                                )}
+                                {row.statusType === "reported_unvalidated" && (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                                    <AlertTriangle size={10} />
+                                    <span>Reported (unvalidated)</span>
+                                  </span>
+                                )}
+                                {row.statusType === "awaiting_verification" && (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                                    <HelpCircle size={10} />
+                                    <span>Awaiting verification</span>
+                                  </span>
+                                )}
+                                {row.statusType === "changed" && (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-sky-50 text-sky-700 border border-sky-200">
+                                    <Activity size={10} />
+                                    <span>Changed</span>
+                                  </span>
+                                )}
+                                {row.statusType === "missing" && (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200">
+                                    <span>Not established</span>
+                                  </span>
+                                )}
+                                {row.statusType === "needs_review" && (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                                    <AlertTriangle size={10} />
+                                    <span>{row.status || "Needs review"}</span>
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-3 px-4 text-right">
+                                {row.meeting ? (
+                                  <button
+                                    onClick={() => openTranscriptDrawer(row.meeting)}
+                                    className="text-[11px] font-bold text-[#0D9488] hover:underline inline-flex items-center gap-1"
+                                  >
+                                    <span>{row.sourceLabel}</span>
+                                  </button>
+                                ) : (
+                                  <span className="text-[11px] text-[#94A3B8] font-medium">{row.sourceLabel}</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))
+                        )}
                       </tbody>
                     </table>
                   </div>
 
                 </div>
 
-                {/* SECTION 2: What Changed Across Calls (Timeline with Call 01 -> Call 02) */}
+                {/* SECTION 2: What Changed Across Calls (Timeline) */}
                 <div className="bg-white border border-[#E5E7EB] rounded-xl p-5 shadow-3xs space-y-4">
                   <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-3">
                     <div>
@@ -1416,88 +1589,77 @@ ${prepNotes || "No agenda notes drafted."}
                     </div>
 
                     <div className="flex items-center gap-2 text-[10px] font-bold text-[#64748B]">
-                      <span className="px-2 py-0.5 bg-[#F1F5F9] rounded border border-[#E2E8F0]">Call 01 (Oct 18)</span>
-                      <span>→</span>
-                      <span className="px-2 py-0.5 bg-[#F1F5F9] rounded border border-[#E2E8F0]">Call 02 (Oct 20)</span>
+                      {meetingsHistory.length >= 2 ? (
+                        <>
+                          <span className="px-2 py-0.5 bg-[#F1F5F9] rounded border border-[#E2E8F0]">{meetingsHistory[meetingsHistory.length - 1]?.title || "Initial Call"}</span>
+                          <span>→</span>
+                          <span className="px-2 py-0.5 bg-[#F1F5F9] rounded border border-[#E2E8F0]">{meetingsHistory[0]?.title || "Latest Call"}</span>
+                        </>
+                      ) : (
+                        <span className="px-2 py-0.5 bg-[#F1F5F9] rounded border border-[#E2E8F0]">
+                          {meetingsHistory[0]?.title || "Single Session"}
+                        </span>
+                      )}
                     </div>
                   </div>
 
-                  {/* 3 Change Cards */}
-                  <div className="space-y-3">
-                    
-                    {/* Change Card 1: Budget */}
-                    <div className="p-3.5 rounded-lg border border-[#E2E8F0] bg-[#FAFBFB] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <DollarSign size={13} className="text-emerald-600" />
-                          <h4 className="text-xs font-extrabold text-[#0F172A]">
-                            Budget: $0 → $18,500/yr
-                          </h4>
-                          <span className="px-1.5 py-0.2 bg-emerald-50 text-emerald-700 border border-emerald-200 text-[9px] font-bold rounded">
-                            Identified
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-[#475569] font-medium leading-relaxed">
-                          Call 01: Budget unconfirmed → Call 02: Priya stated $18,500 allocated from FY25 tooling budget.
-                        </p>
+                  {/* Dynamic Change Cards */}
+                  {(() => {
+                    const validChanges = (timelineChanges || []).filter(ch =>
+                      ch && ch.field && ch.new_value && ch.field !== 'undefined' && ch.new_value !== 'undefined'
+                    );
+                    return validChanges.length > 0 ? (
+                      <div className="space-y-3">
+                        {validChanges.map((ch, idx) => {
+                          const sourceMeeting = meetingsHistory.find(m => m.id === ch.meeting_id) || meetingsHistory[0];
+                          return (
+                            <div key={ch.id || idx} className="p-3.5 rounded-lg border border-[#E2E8F0] bg-[#FAFBFB] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                              <div className="space-y-1">
+                                <div className="flex items-center gap-2">
+                                  {ch.field?.toLowerCase().includes("budget") ? (
+                                    <DollarSign size={13} className="text-emerald-600" />
+                                  ) : ch.field?.toLowerCase().includes("timeline") ? (
+                                    <Calendar size={13} className="text-amber-600" />
+                                  ) : (
+                                    <ShieldAlert size={13} className="text-[#64748B]" />
+                                  )}
+                                  <h4 className="text-xs font-extrabold text-[#0F172A]">
+                                    {ch.field}: {ch.old_value && ch.old_value !== 'undefined' && ch.old_value !== ch.new_value ? `${ch.old_value} → ${ch.new_value}` : ch.new_value}
+                                  </h4>
+                                  <span className={`px-1.5 py-0.2 text-[9px] font-bold rounded ${
+                                    ch.type === "identified"
+                                      ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                      : ch.type === "delayed" || ch.type === "shifted"
+                                      ? "bg-amber-50 text-amber-700 border border-amber-200"
+                                      : "bg-slate-100 text-slate-700 border border-slate-200"
+                                  }`}>
+                                    {ch.type ? ch.type.charAt(0).toUpperCase() + ch.type.slice(1) : "Updated"}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-[#475569] font-medium leading-relaxed">
+                                  {ch.evidence || (ch.old_value && ch.old_value !== 'undefined' ? `${ch.field} changed from "${ch.old_value}" to "${ch.new_value}".` : `${ch.field}: ${ch.new_value}`)}
+                                </p>
+                              </div>
+                              {sourceMeeting && (
+                                <button
+                                  onClick={() => openTranscriptDrawer(sourceMeeting)}
+                                  className="text-[10px] font-bold text-[#0D9488] hover:underline whitespace-nowrap self-start sm:self-center"
+                                >
+                                  {ch.citation || `${sourceMeeting.title} →`}
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
-                      <button
-                        onClick={() => openTranscriptDrawer(meetingsHistory[0])}
-                        className="text-[10px] font-bold text-[#0D9488] hover:underline whitespace-nowrap self-start sm:self-center"
-                      >
-                        Call 02 transcript (04:12) →
-                      </button>
-                    </div>
-
-                    {/* Change Card 2: Timeline */}
-                    <div className="p-3.5 rounded-lg border border-[#FDE68A] bg-[#FFFDF5] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <Calendar size={13} className="text-amber-600" />
-                          <h4 className="text-xs font-extrabold text-[#0F172A]">
-                            Timeline: October 15 → November (Delayed)
-                          </h4>
-                          <span className="px-1.5 py-0.2 bg-amber-50 text-amber-700 border border-amber-200 text-[9px] font-bold rounded">
-                            Shifted
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-[#475569] font-medium leading-relaxed">
-                          Call 01: Target implementation Oct 15 → Call 02: Pushed to November due to InfoSec vendor review.
-                        </p>
+                    ) : (
+                      <div className="p-4 text-center text-xs text-[#94A3B8] italic border border-dashed border-[#E2E8F0] rounded-lg">
+                        {meetingsHistory.length <= 1 
+                          ? "At least two recorded meetings are required to detect cross-call fact changes."
+                          : "No verified changes across calls yet."}
                       </div>
-                      <button
-                        onClick={() => openTranscriptDrawer(meetingsHistory[0])}
-                        className="text-[10px] font-bold text-[#0D9488] hover:underline whitespace-nowrap self-start sm:self-center"
-                      >
-                        Call 02 transcript (11:30) →
-                      </button>
-                    </div>
-
-                    {/* Change Card 3: Competitor */}
-                    <div className="p-3.5 rounded-lg border border-[#E2E8F0] bg-[#FAFBFB] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <ShieldAlert size={13} className="text-[#64748B]" />
-                          <h4 className="text-xs font-extrabold text-[#0F172A]">
-                            Competitor mentioned: Gong
-                          </h4>
-                          <span className="px-1.5 py-0.2 bg-slate-100 text-slate-700 border border-slate-200 text-[9px] font-bold rounded">
-                            Incumbent
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-[#475569] font-medium leading-relaxed">
-                          Call 01: No competitors mentioned → Call 02: Currently on Gong contract through Dec 31.
-                        </p>
-                      </div>
-                      <button
-                        onClick={() => openTranscriptDrawer(meetingsHistory[0])}
-                        className="text-[10px] font-bold text-[#0D9488] hover:underline whitespace-nowrap self-start sm:self-center"
-                      >
-                        Call 02 transcript (08:45) →
-                      </button>
-                    </div>
-
-                  </div>
+                    );
+                  })()}
                 </div>
 
                 {/* SECTION 3: Commitments & Next Steps (Split: Customer owes us vs Our team owes customer) */}
@@ -1561,13 +1723,17 @@ ${prepNotes || "No agenda notes drafted."}
                                     {item.task}
                                   </p>
                                   <div className="flex items-center gap-2 text-[10px] text-[#64748B] font-semibold flex-wrap">
-                                    <span className="text-[#334155]">{item.owner ? `${item.owner} (VP Sales)` : "Priya (VP Sales)"}</span>
+                                    <span className="text-[#334155]">{item.owner || "Customer Contact"}</span>
+                                    {item.due_date && item.due_date !== "-" && (
+                                      <>
+                                        <span>•</span>
+                                        <span className="px-1.5 py-0.2 bg-amber-50 text-amber-700 rounded text-[9px] font-bold">
+                                          Due {item.due_date}
+                                        </span>
+                                      </>
+                                    )}
                                     <span>•</span>
-                                    <span className="px-1.5 py-0.2 bg-amber-50 text-amber-700 rounded text-[9px] font-bold">
-                                      {item.due_date && item.due_date !== "-" ? `Due ${item.due_date}` : "Due Oct 24"}
-                                    </span>
-                                    <span>•</span>
-                                    <span className="text-[#94A3B8]">From Call 02</span>
+                                    <span className="text-[#94A3B8]">{item.meeting_title || "Meeting record"}</span>
                                   </div>
                                 </div>
                               </div>
@@ -1615,13 +1781,17 @@ ${prepNotes || "No agenda notes drafted."}
                                     {item.task}
                                   </p>
                                   <div className="flex items-center gap-2 text-[10px] text-[#64748B] font-semibold flex-wrap">
-                                    <span className="text-[#334155]">{item.owner || "Sarah Chen"}</span>
+                                    <span className="text-[#334155]">{item.owner || selectedCompanyData?.company?.crm_owner || "Our Team"}</span>
+                                    {item.due_date && item.due_date !== "-" && (
+                                      <>
+                                        <span>•</span>
+                                        <span className="px-1.5 py-0.2 bg-emerald-50 text-emerald-700 rounded text-[9px] font-bold">
+                                          Due {item.due_date}
+                                        </span>
+                                      </>
+                                    )}
                                     <span>•</span>
-                                    <span className="px-1.5 py-0.2 bg-emerald-50 text-emerald-700 rounded text-[9px] font-bold">
-                                      {item.due_date && item.due_date !== "-" ? `Due ${item.due_date}` : "Due Oct 22"}
-                                    </span>
-                                    <span>•</span>
-                                    <span className="text-[#94A3B8]">From Call 02</span>
+                                    <span className="text-[#94A3B8]">{item.meeting_title || "Meeting record"}</span>
                                   </div>
                                 </div>
                               </div>
@@ -1651,7 +1821,7 @@ ${prepNotes || "No agenda notes drafted."}
                       <span>PulseSync Copilot</span>
                     </h4>
                     <span className="text-[10px] text-[#64748B] font-semibold mt-0.5 block">
-                      Answers grounded in Call 01 & Call 02 transcripts
+                      Answers grounded in verified meeting transcripts & intelligence
                     </span>
                   </div>
 
@@ -1663,9 +1833,9 @@ ${prepNotes || "No agenda notes drafted."}
                           <span className="text-[9px] font-bold text-[#94A3B8] uppercase block tracking-wider">Suggested Questions</span>
                           <div className="space-y-1.5">
                             {[
-                              "What did Priya say about budget?",
-                              "Why was timeline delayed?",
-                              "Who is the decision maker?"
+                              `What was discussed regarding budget for ${selectedCompanyData?.company?.name || "this account"}?`,
+                              `What is the target timeline or deployment date?`,
+                              `Who is identified as the decision maker or buyer?`
                             ].map((q, idx) => (
                               <button
                                 key={idx}
@@ -1707,7 +1877,7 @@ ${prepNotes || "No agenda notes drafted."}
                                   onClick={() => openTranscriptDrawer(meetingsHistory[0])}
                                   className="px-1.5 py-0.5 bg-white border border-[#E5E7EB] text-[#0D9488] text-[9px] rounded font-bold hover:underline"
                                 >
-                                  🔗 {cit.citation || `Source: ${cit.meeting_title || 'Call 02'}`}
+                                  🔗 {cit.citation || `Source: ${cit.meeting_title || 'Call Session'}`}
                                 </button>
                               ))}
                             </div>
@@ -1766,73 +1936,95 @@ ${prepNotes || "No agenda notes drafted."}
                   </div>
 
                   {/* Economic buyer not confirmed Warning Banner */}
-                  <div className="p-3 rounded-lg bg-amber-50/70 border border-amber-200 flex items-start gap-2">
-                    <AlertTriangle size={14} className="text-amber-600 flex-shrink-0 mt-0.5" />
-                    <div className="space-y-0.5">
-                      <span className="text-[11px] font-extrabold text-amber-900 block">
-                        Economic buyer not confirmed
-                      </span>
-                      <p className="text-[10.5px] text-amber-800 font-medium leading-normal">
-                        Priya mentioned VP Finance makes final call but name was not captured.
-                      </p>
+                  {!stakeholders.some(s => s.role === 'Economic Buyer' || s.decision_authority === 'Economic Buyer') && !customerIntelligence?.facts?.decision_maker?.value && (
+                    <div className="p-3 rounded-lg bg-amber-50/70 border border-amber-200 flex items-start gap-2">
+                      <AlertTriangle size={14} className="text-amber-600 flex-shrink-0 mt-0.5" />
+                      <div className="space-y-0.5">
+                        <span className="text-[11px] font-extrabold text-amber-900 block">
+                          Economic buyer not confirmed
+                        </span>
+                        <p className="text-[10.5px] text-amber-800 font-medium leading-normal">
+                          No decision maker with budget allocation authority has been confirmed for this account yet.
+                        </p>
+                      </div>
                     </div>
-                  </div>
+                  )}
 
                   {/* Stakeholder Rows */}
-                  <div className="space-y-2.5">
-                    
-                    {/* Row 1: Priya Sharma */}
-                    <div 
-                      onClick={() => handleOpenMentions({ speaker_id: "priya", name: "Priya Sharma", job_title: "VP Sales", role: "Champion" })}
-                      className="p-3 rounded-lg border border-[#E2E8F0] hover:border-[#10B981]/50 cursor-pointer transition bg-white flex items-center justify-between gap-3 shadow-2xs"
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="h-8 w-8 rounded-full bg-teal-50 border border-teal-200 text-teal-800 flex items-center justify-center font-bold text-xs">
-                          PS
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-xs font-extrabold text-[#0F172A] hover:underline">
-                              Priya Sharma
-                            </span>
-                            <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                              Champion
-                            </span>
-                          </div>
-                          <span className="text-[10px] text-[#64748B] font-semibold block">
-                            VP Sales • Attended 2 calls (Call 01, Call 02)
-                          </span>
-                        </div>
+                  <div className="space-y-3">
+                    {stakeholders.length === 0 ? (
+                      <div className="p-4 text-center text-xs text-[#94A3B8] italic border border-dashed border-[#E2E8F0] rounded-lg">
+                        No stakeholders mapped for this account yet. Use "Add" above to register buying committee members.
                       </div>
-                      <ChevronRight size={13} className="text-[#94A3B8]" />
-                    </div>
-
-                    {/* Row 2: Daniel Lee */}
-                    <div 
-                      onClick={() => handleOpenMentions({ speaker_id: "daniel", name: "Daniel Lee", job_title: "Sales Ops Lead", role: "Technical Buyer" })}
-                      className="p-3 rounded-lg border border-[#E2E8F0] hover:border-[#10B981]/50 cursor-pointer transition bg-white flex items-center justify-between gap-3 shadow-2xs"
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="h-8 w-8 rounded-full bg-sky-50 border border-sky-200 text-sky-800 flex items-center justify-center font-bold text-xs">
-                          DL
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-xs font-extrabold text-[#0F172A] hover:underline">
-                              Daniel Lee
-                            </span>
-                            <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-sky-50 text-sky-700 border border-sky-200">
-                              Technical Buyer
-                            </span>
-                          </div>
-                          <span className="text-[10px] text-[#64748B] font-semibold block">
-                            Sales Ops Lead • Attended 2 calls (Call 01, Call 02)
+                    ) : (
+                      <>
+                        {/* Customer Buying Committee */}
+                        <div className="space-y-2">
+                          <span className="text-[10px] font-bold text-[#64748B] uppercase tracking-wider block">
+                            Buying Committee
                           </span>
+                          {stakeholders.filter(s => !s.is_team).map((sh, sIdx) => {
+                            const initials = sh.name ? sh.name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase() : "ST";
+                            const authority = sh.decision_authority || sh.role || "Stakeholder";
+                            return (
+                              <div 
+                                key={sh.id || sh.speaker_id || sIdx}
+                                onClick={() => handleOpenMentions({ speaker_id: sh.speaker_id || sh.name?.toLowerCase(), name: sh.name, job_title: sh.job_title || authority, role: authority })}
+                                className="p-3 rounded-lg border border-[#E2E8F0] hover:border-[#10B981]/50 cursor-pointer transition bg-white flex items-center justify-between gap-3 shadow-2xs"
+                              >
+                                <div className="flex items-center gap-3">
+                                  <div className="h-8 w-8 rounded-full bg-teal-50 border border-teal-200 text-teal-800 flex items-center justify-center font-bold text-xs">
+                                    {initials}
+                                  </div>
+                                  <div>
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="text-xs font-extrabold text-[#0F172A] hover:underline">
+                                        {sh.name}
+                                      </span>
+                                      <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold ${
+                                        authority === "Champion" || authority === "Economic Buyer"
+                                          ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                          : authority === "Business Decision Maker"
+                                          ? "bg-indigo-50 text-indigo-700 border border-indigo-200"
+                                          : authority.includes("Approver") || authority.includes("Reviewer")
+                                          ? "bg-purple-50 text-purple-700 border border-purple-200"
+                                          : "bg-sky-50 text-sky-700 border border-sky-200"
+                                      }`}>
+                                        {authority}
+                                      </span>
+                                    </div>
+                                    <span className="text-[10px] text-[#64748B] font-semibold block">
+                                      {sh.job_title ? `${sh.job_title} • ` : ""}{sh.department || "Operations"}
+                                    </span>
+                                  </div>
+                                </div>
+                                <ChevronRight size={13} className="text-[#94A3B8]" />
+                              </div>
+                            );
+                          })}
                         </div>
-                      </div>
-                      <ChevronRight size={13} className="text-[#94A3B8]" />
-                    </div>
 
+                        {/* PulseSync Account Team (Separate section) */}
+                        {stakeholders.some(s => s.is_team) && (
+                          <div className="pt-2 border-t border-[#F1F5F9] space-y-1.5">
+                            <span className="text-[9.5px] font-bold text-[#94A3B8] uppercase tracking-wider block">
+                              PulseSync Account Team
+                            </span>
+                            {stakeholders.filter(s => s.is_team).map((sh, sIdx) => (
+                              <div key={sh.id || sh.speaker_id || sIdx} className="p-2 rounded-lg bg-[#FAFBFB] border border-[#F1F5F9] flex items-center justify-between text-[11px]">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-bold text-[#334155]">{sh.name}</span>
+                                  <span className="text-[9.5px] text-[#64748B]">({sh.job_title})</span>
+                                </div>
+                                <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 border border-slate-200">
+                                  PulseSync
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )}
                   </div>
 
                 </div>
@@ -1843,7 +2035,7 @@ ${prepNotes || "No agenda notes drafted."}
                     <div>
                       <h4 className="text-xs font-extrabold text-[#0F172A] uppercase tracking-wider flex items-center gap-1.5">
                         <Clock size={14} className="text-[#10B981]" />
-                        <span>Call History ({meetingsHistory.length || 2})</span>
+                        <span>Call History ({meetingsHistory.length})</span>
                       </h4>
                       <span className="text-[10px] text-[#64748B] font-semibold mt-0.5 block">
                         Recordings, playback, and independent call reviews
@@ -1857,13 +2049,15 @@ ${prepNotes || "No agenda notes drafted."}
                       <div className="text-center py-6 text-xs text-[#94A3B8] italic">No calls recorded.</div>
                     ) : (
                       meetingsHistory.map((m, idx) => {
-                        const isCall02 = idx === 0;
-                        const callNumber = isCall02 ? "Call 02" : "Call 01";
-                        const callSubtitle = isCall02 ? "Follow-up & Pricing Discussion" : "Initial Discovery & Demo";
-                        const dateFormatted = isCall02 ? "Oct 20, 2026" : "Oct 18, 2026";
-                        const durationFormatted = isCall02 ? "32 min" : "45 min";
-                        const participantCount = isCall02 ? "4 participants" : "3 participants";
-                        const actionItemCount = isCall02 ? "8 action items" : "5 action items";
+                        const callNumber = `Call ${String(meetingsHistory.length - idx).padStart(2, '0')}`;
+                        const callSubtitle = m.title || `Session ${idx + 1}`;
+                        const dateFormatted = m.created_at ? new Date(m.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : "Date unrecorded";
+                        const durationMinutes = m.duration_seconds ? Math.round(m.duration_seconds / 60) : (m.duration ? Math.round(m.duration / 60) : null);
+                        const durationFormatted = durationMinutes ? `${durationMinutes} min` : "Duration unavailable";
+                        const numParticipants = Array.isArray(m.speakers) ? m.speakers.length : (m.speaker_count || 0);
+                        const participantCount = numParticipants > 0 ? `${numParticipants} ${numParticipants === 1 ? 'participant' : 'participants'}` : "Participants unlisted";
+                        const numActionItems = Array.isArray(m.action_items) ? m.action_items.length : 0;
+                        const actionItemCount = `${numActionItems} ${numActionItems === 1 ? 'action item' : 'action items'}`;
                         const isCurrentlyPlaying = playingCallId === m.id;
 
                         return (
@@ -2022,7 +2216,7 @@ ${prepNotes || "No agenda notes drafted."}
                   <label className="text-[10px] font-bold text-[#64748B] uppercase block mb-1">Owner</label>
                   <input
                     type="text"
-                    placeholder={newCommitmentData.type === "customer" ? "Priya (VP Sales)" : "Sarah Chen"}
+                    placeholder={newCommitmentData.type === "customer" ? "e.g., Client Contact" : "e.g., Account Executive"}
                     value={newCommitmentData.owner}
                     onChange={(e) => setNewCommitmentData(prev => ({ ...prev, owner: e.target.value }))}
                     className="w-full bg-[#FAFBFB] border border-[#CBD5E1] rounded-lg px-3 py-1.5 text-xs text-[#0F172A] outline-none focus:border-[#10B981]"
@@ -2032,7 +2226,7 @@ ${prepNotes || "No agenda notes drafted."}
                   <label className="text-[10px] font-bold text-[#64748B] uppercase block mb-1">Due Date</label>
                   <input
                     type="text"
-                    placeholder="e.g., Oct 24 or Tomorrow"
+                    placeholder="e.g., Nov 15 or Next meeting"
                     value={newCommitmentData.due_date}
                     onChange={(e) => setNewCommitmentData(prev => ({ ...prev, due_date: e.target.value }))}
                     className="w-full bg-[#FAFBFB] border border-[#CBD5E1] rounded-lg px-3 py-1.5 text-xs text-[#0F172A] outline-none focus:border-[#10B981]"

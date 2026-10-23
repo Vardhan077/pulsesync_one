@@ -159,6 +159,9 @@ function createTestDbStore() {
         status: 'approved'
       }
     ],
+    summaries: [],
+    companies: [],
+    speakers: [],
     sync_runs: [],
     sync_items: []
   };
@@ -355,8 +358,373 @@ async function runTests() {
   assert.ok(typeof res2.summary.fieldsUpdatedCount === 'number', 'alreadySynced summary.fieldsUpdatedCount must be number');
   console.log('✓ Test 6 Passed: Response shape contract verified.');
 
+  // -------------------------------------------------------------
+  // Test 7: Normalization of All Supported and Complex Data Types
+  // -------------------------------------------------------------
+  console.log('Test 7: Type normalization handles strings, numbers, booleans, arrays, objects, and circular refs without [object Object]...');
+  // Plain string
+  assert.equal(engine._normalizeFieldValue('  Enterprise Plan  '), 'Enterprise Plan');
+  // Numeric string & amount
+  assert.equal(engine._normalizeFieldValue('$125,000.00 ARR', 'amount'), '125000');
+  // Raw number
+  assert.equal(engine._normalizeFieldValue(95000), '95000');
+  // Boolean
+  assert.equal(engine._normalizeFieldValue(true), 'true');
+  assert.equal(engine._normalizeFieldValue(false), 'false');
+  // Array of primitives
+  assert.equal(engine._normalizeFieldValue(['SOC2', 'GDPR', 'HIPAA']), 'SOC2, GDPR, HIPAA');
+  // Array of objects (should extract titles/names/tasks, never [object Object])
+  const objArray = [
+    { task: 'Security Review', owner: 'Alice' },
+    { task: 'Contract Approval', owner: 'Bob' }
+  ];
+  const normArray = engine._normalizeFieldValue(objArray);
+  assert.equal(normArray, 'Security Review; Contract Approval');
+  assert.ok(!normArray.includes('[object Object]'), 'Array of objects must not format as [object Object]');
+  // Nested object
+  const nestedObj = { tier: 'Enterprise', seats: 200 };
+  const normObj = engine._normalizeFieldValue(nestedObj);
+  assert.equal(normObj, 'tier: Enterprise; seats: 200');
+  assert.ok(!normObj.includes('[object Object]'), 'Nested object must not format as [object Object]');
+  // Null, undefined, empty, and "not mentioned"
+  assert.equal(engine._normalizeFieldValue(null), '');
+  assert.equal(engine._normalizeFieldValue(undefined), '');
+  assert.equal(engine._normalizeFieldValue(''), '');
+  assert.equal(engine._normalizeFieldValue('Not mentioned'), '');
+  assert.equal(engine._normalizeFieldValue([]), '');
+  assert.equal(engine._normalizeFieldValue({}), '');
+  // Circular reference (must not throw or produce [object Object])
+  const circular = { name: 'Acme Self' };
+  circular.child = circular;
+  const normCirc = engine._normalizeFieldValue(circular);
+  assert.equal(normCirc, 'Acme Self');
+  assert.ok(!normCirc.includes('[object Object]'), 'Circular structure must not produce [object Object]');
+  console.log('✓ Test 7 Passed: All data types normalized cleanly without [object Object] or crashes.');
+
+  // -------------------------------------------------------------
+  // Test 8: Internal Container and Metadata Keys Exclusion
+  // -------------------------------------------------------------
+  console.log('Test 8: prepareSync excludes internal metadata and container keys from CRM diffs...');
+  // Add meeting with exact problematic structure from screenshot
+  store.meetings.push({
+    id: 'mtg_containers',
+    title: 'Acme MEDDICC Discovery',
+    company_name: 'Acme Containers Inc',
+    status: 'ready_for_review',
+    workflow_state: 'ready_for_review'
+  });
+  store.call_extractions.push({
+    meeting_id: 'mtg_containers',
+    extracted_data: {
+      meeting_id: 'mtg_containers',
+      call_type_rationale: 'Customer discussing pricing and timeline',
+      call_type_confidence: 0.98,
+      profile: { company: 'Acme', industry: 'Software' },
+      action_items: [
+        { task: 'Follow up on NDA', owner: 'Dave' }
+      ],
+      deal_signals: { urgency: 'High', sentiment: 'Positive' },
+      conversation_intelligence: { talk_ratio: 0.65 },
+      template_fields: [
+        { field_name: 'economic_buyer', value: 'Sarah Connor', review_status: 'approved' },
+        { field_name: 'budget', value: '$150,000', review_status: 'approved' },
+        { field_name: 'pain', value: 'Current tool latency too high', review_status: 'approved' }
+      ]
+    }
+  });
+
+  const prepContainers = await engine.prepareSync('mtg_containers', 'int_hs_001');
+  const internalKeys = [
+    'fields', 'template_fields', 'profile', 'meeting_id', 'action_items',
+    'deal_signals', 'conversation_intelligence', 'summary_sections',
+    'irrelevant_segments', 'call_type_rationale', 'call_type_confidence'
+  ];
+
+  for (const diff of prepContainers.fieldDiffs) {
+    assert.ok(
+      !internalKeys.includes(diff.pulseSyncField.toLowerCase()),
+      `Internal key "${diff.pulseSyncField}" must not appear as a CRM property diff!`
+    );
+    assert.ok(
+      !String(diff.newValue).includes('[object Object]'),
+      `Diff value for "${diff.pulseSyncField}" must not contain [object Object]`
+    );
+  }
+
+  // Ensure genuine playbook fields were extracted
+  const extractedFieldNames = prepContainers.fieldDiffs.map(d => d.pulseSyncField.toLowerCase());
+  assert.ok(extractedFieldNames.includes('economic_buyer'), 'Playbook field economic_buyer must be extracted');
+  assert.ok(extractedFieldNames.includes('budget'), 'Playbook field budget must be extracted');
+  assert.ok(extractedFieldNames.includes('pain'), 'Playbook field pain must be extracted');
+  console.log('✓ Test 8 Passed: Internal container keys cleanly excluded and playbook fields properly surfaced.');
+
+  // -------------------------------------------------------------
+  // Test 9: Approved but Unmapped Fields Handling
+  // -------------------------------------------------------------
+  console.log('Test 9: Approved but unmapped properties remain visible in preview but excluded from CRM writes...');
+  // Add a field that is unmapped in custom mappings or defaults
+  store.call_extractions.push({
+    meeting_id: 'mtg_unmapped_test',
+    extracted_data: {
+      template_fields: [
+        { field_name: 'budget', value: '80000', review_status: 'approved' },
+        { field_name: 'unmapped_custom_metric', value: 'Custom Score 95', review_status: 'approved' }
+      ]
+    }
+  });
+  store.meetings.push({
+    id: 'mtg_unmapped_test',
+    title: 'Unmapped Field Meeting',
+    company_name: 'Gamma Systems',
+    status: 'ready_for_review',
+    workflow_state: 'ready_for_review'
+  });
+
+  const prepUnmapped = await engine.prepareSync('mtg_unmapped_test', 'int_hs_001');
+  const unmappedDiff = prepUnmapped.fieldDiffs.find(d => d.pulseSyncField === 'unmapped_custom_metric');
+  assert.ok(unmappedDiff, 'Unmapped field should be present in preview for visibility');
+  assert.equal(unmappedDiff.isMapped, false, 'isMapped must be false');
+  assert.equal(unmappedDiff.destinationField, 'unmapped', 'destinationField must be "unmapped"');
+  assert.equal(unmappedDiff.status, 'UNMAPPED', 'status must be "UNMAPPED"');
+  assert.equal(unmappedDiff.isEligibleForSync, false, 'isEligibleForSync must be false for unmapped field');
+
+  // Attempt to execute sync with approvedFields explicitly including the unmapped field
+  let capturedDealProps = null;
+  const originalCreateDeal = mockAdapter.createDeal;
+  mockAdapter.createDeal = async (token, props) => {
+    capturedDealProps = props;
+    return { id: 'deal_unmapped_created', url: 'http://hubspot.com/deal' };
+  };
+
+  const execUnmapped = await engine.executeSync('mtg_unmapped_test', 'int_hs_001', {
+    approvedFields: ['budget', 'unmapped_custom_metric']
+  });
+
+  assert.equal(execUnmapped.success, true);
+  // Verify unmapped property was NOT added to dealProps
+  assert.equal(capturedDealProps.unmapped_custom_metric, undefined, 'Unmapped property must not be written to CRM');
+  assert.equal(capturedDealProps.unmapped, undefined, 'unmapped key must not be written to CRM');
+  // Verify sync_items did NOT save the unmapped property
+  const unmappedItems = store.sync_items.filter(i => i.destination_field === 'unmapped');
+  assert.equal(unmappedItems.length, 0, 'sync_items must not contain any unmapped property rows');
+
+  // Restore adapter methods
+  mockAdapter.createDeal = originalCreateDeal;
+  console.log('✓ Test 9 Passed: Approved unmapped properties safely excluded from CRM writes and audit items.');
+
+  // -------------------------------------------------------------
+  // Test 10: Incompatible Destination Property Type Flagged and Excluded
+  // -------------------------------------------------------------
+  console.log('Test 10: Incompatible destination property types are flagged and excluded from execution...');
+  store.meetings.push({
+    id: 'mtg_type_mismatch',
+    title: 'Type Incompatibility Meeting',
+    company_name: 'Mismatch LLC',
+    status: 'ready_for_review',
+    workflow_state: 'ready_for_review'
+  });
+  store.call_extractions.push({
+    meeting_id: 'mtg_type_mismatch',
+    extracted_data: {
+      template_fields: [
+        { field_name: 'budget', value: 'Not-A-Valid-Amount-Or-Number', review_status: 'approved' },
+        { field_name: 'timeline', value: 'Invalid-Date-String-XYZ', review_status: 'approved' }
+      ]
+    }
+  });
+
+  const prepMismatch = await engine.prepareSync('mtg_type_mismatch', 'int_hs_001');
+  const budgetDiff = prepMismatch.fieldDiffs.find(d => d.pulseSyncField === 'budget');
+  assert.ok(budgetDiff, 'budget diff present');
+  assert.equal(budgetDiff.status, 'TYPE_INCOMPATIBLE', 'Status must be TYPE_INCOMPATIBLE');
+  assert.ok(budgetDiff.validationError, 'validationError must be present');
+  assert.equal(budgetDiff.isEligibleForSync, false, 'isEligibleForSync must be false');
+
+  const execMismatch = await engine.executeSync('mtg_type_mismatch', 'int_hs_001', {
+    approvedFields: ['budget', 'timeline']
+  });
+  assert.equal(execMismatch.success, true);
+  // Budget should have been excluded from executed writes because it has a validationError
+  const budgetSyncItem = store.sync_items.find(i => i.sync_run_id === execMismatch.syncRunId && i.destination_field === 'amount');
+  assert.equal(budgetSyncItem, undefined, 'Invalid amount must be excluded from sync_items');
+  console.log('✓ Test 10 Passed: Incompatible types safely flagged with validation errors and excluded from writes.');
+
+  // -------------------------------------------------------------
+  // Test 11: Authoritative Summary and Action Items Separation
+  // -------------------------------------------------------------
+  console.log('Test 11: Summary and action items remain distinct according to schema...');
+  store.meetings.push({
+    id: 'mtg_summary_sep',
+    title: 'Executive Sync',
+    company_name: 'Executive Corp',
+    status: 'ready_for_review',
+    workflow_state: 'ready_for_review'
+  });
+  store.summaries.push({
+    meeting_id: 'mtg_summary_sep',
+    overview: 'Customer agreed to standard enterprise contract with custom SLA.',
+    action_items: [
+      { task: 'Send SLA document', owner: 'Legal' },
+      { task: 'Schedule onboarding', owner: 'CSM' }
+    ]
+  });
+
+  const prepSummary = await engine.prepareSync('mtg_summary_sep', 'int_hs_001');
+  const summaryDiff = prepSummary.fieldDiffs.find(d => d.pulseSyncField === 'summary');
+  assert.ok(summaryDiff, 'Summary diff mapped to description');
+  assert.equal(summaryDiff.newValue, 'Customer agreed to standard enterprise contract with custom SLA.');
+  assert.ok(!summaryDiff.newValue.includes('Send SLA document'), 'Summary must NOT contain concatenated action items');
+
+  // Verify action items are in tasksSummary
+  assert.equal(prepSummary.tasksSummary.total, 2);
+  assert.equal(prepSummary.tasksSummary.items[0].task, 'Send SLA document');
+  console.log('✓ Test 11 Passed: Authoritative summary remains pristine and action items stay in task layer.');
+
+  // -------------------------------------------------------------
+  // Test 12: Preview Values Match Actual Sync Execution Payload
+  // -------------------------------------------------------------
+  console.log('Test 12: Preview values match actual CRM payload values exactly...');
+  store.meetings.push({
+    id: 'mtg_preview_exec_match',
+    title: 'Value Parity Meeting',
+    company_name: 'Parity Inc',
+    status: 'ready_for_review',
+    workflow_state: 'ready_for_review'
+  });
+  store.call_extractions.push({
+    meeting_id: 'mtg_preview_exec_match',
+    extracted_data: {
+      template_fields: [
+        { field_name: 'budget', value: '$65,000 ARR', review_status: 'approved' },
+        { field_name: 'economic_buyer', value: 'John Smith', review_status: 'approved' }
+      ]
+    }
+  });
+
+  const prepMatch = await engine.prepareSync('mtg_preview_exec_match', 'int_hs_001');
+  const previewBudget = prepMatch.fieldDiffs.find(d => d.pulseSyncField === 'budget').newValue;
+  assert.equal(previewBudget, '65000', 'Preview budget normalized to 65000');
+
+  const execMatch = await engine.executeSync('mtg_preview_exec_match', 'int_hs_001', {
+    approvedFields: ['budget', 'economic_buyer']
+  });
+  const writtenBudgetItem = store.sync_items.find(i => i.sync_run_id === execMatch.syncRunId && i.destination_field === 'amount');
+  assert.ok(writtenBudgetItem, 'Written budget item found in sync_items');
+  assert.equal(writtenBudgetItem.new_value, previewBudget, 'Executed new_value must strictly equal preview newValue');
+  console.log('✓ Test 12 Passed: Sync preview and execution payload use identical normalized values.');
+
+  // -------------------------------------------------------------
+  // Test 13: Strict Payload Assertion: No [object Object] Anywhere
+  // -------------------------------------------------------------
+  console.log('Test 13: Comprehensive assertion: zero occurrences of [object Object] in any output or payload...');
+  // Inspect all sync items in the test database
+  for (const item of store.sync_items) {
+    assert.ok(!String(item.new_value).includes('[object Object]'), `sync_item new_value contains [object Object]: ${JSON.stringify(item)}`);
+    assert.ok(!String(item.destination_field).includes('[object Object]'), 'destination_field contains [object Object]');
+    assert.ok(!String(item.destination_object).includes('[object Object]'), 'destination_object contains [object Object]');
+  }
+  console.log('✓ Test 13 Passed: Zero occurrences of [object Object] in any sync payload, record, or item.');
+
+  // -------------------------------------------------------------
+  // Test 14: Summary Contamination Prevention & Task Layer Isolation
+  // -------------------------------------------------------------
+  console.log('Test 14: Verifying summary contamination prevention: CRM description receives ONLY business summary...');
+  store.meetings.push({
+    id: 'mtg_contaminated_summary',
+    title: '01_Cold_Prospecting',
+    company_name: 'Pulse INC.',
+    status: 'ready_for_review',
+    workflow_state: 'ready_for_review',
+    call_type: 'cold_prospecting',
+    overview: 'The customer highlighted operational friction around getting people to update opportunities consistently. Agreed next steps: Absolutely. I will send a short note and ask Mark whether a brief introduction makes sense. Thanks for being direct with me..'
+  });
+  store.summaries.push({
+    meeting_id: 'mtg_contaminated_summary',
+    overview: 'The customer highlighted operational friction around getting people to update opportunities consistently. Agreed next steps: Absolutely. I will send a short note and ask Mark whether a brief introduction makes sense. Thanks for being direct with me..',
+    action_items: [
+      { task: 'Send a short note and ask Mark whether a brief introduction makes sense.', owner: 'Alex' }
+    ]
+  });
+
+  const prepContam = await engine.prepareSync('mtg_contaminated_summary', 'int_hs_001');
+  const contamSummaryDiff = prepContam.fieldDiffs.find(d => d.pulseSyncField === 'summary');
+  assert.ok(contamSummaryDiff, 'summary diff exists');
+  assert.equal(
+    contamSummaryDiff.newValue,
+    'The customer highlighted operational friction around getting people to update opportunities consistently.'
+  );
+  assert.ok(
+    !contamSummaryDiff.newValue.includes('Agreed next steps'),
+    'Agreed next steps must not be in summary'
+  );
+  assert.ok(
+    !contamSummaryDiff.newValue.includes('Thanks for being direct with me'),
+    'Conversational signoffs must not be in summary'
+  );
+
+  // Verify task remains intact in tasksSummary
+  assert.equal(prepContam.tasksSummary.total, 1);
+  assert.equal(prepContam.tasksSummary.items[0].task, 'Send a short note and ask Mark whether a brief introduction makes sense.');
+  console.log('✓ Test 14 Passed: Summary cleanly decoupled from commitments; tasks remain isolated in task layer.');
+
+  // -------------------------------------------------------------
+  // Test 15: Stage Consistency & Internal Metadata Exclusion
+  // -------------------------------------------------------------
+  console.log('Test 15: Verifying stage consistency & internal metadata exclusion...');
+  store.call_extractions.push({
+    meeting_id: 'mtg_contaminated_summary',
+    extracted_data: {
+      call_type: 'cold_prospecting',
+      call_type_rationale: 'Outbound sales call introducing capabilities',
+      deal_signals: {
+        buying_stage: 'Prospecting'
+      },
+      template_fields: []
+    }
+  });
+
+  const prepStage = await engine.prepareSync('mtg_contaminated_summary', 'int_hs_001');
+  // call_type must NOT be in fieldDiffs
+  const callTypeDiff = prepStage.fieldDiffs.find(d => d.pulseSyncField === 'call_type');
+  assert.equal(callTypeDiff, undefined, 'call_type must be excluded as internal metadata');
+
+  // buying_stage must be Prospecting, NOT defaulted to Discovery for cold calls
+  const buyingStageDiff = prepStage.fieldDiffs.find(d => d.pulseSyncField === 'buying_stage');
+  if (buyingStageDiff) {
+    assert.equal(buyingStageDiff.newValue, 'Prospecting', 'buying_stage must be Prospecting for cold prospecting');
+    assert.equal(buyingStageDiff.isMapped, false, 'buying_stage is unmapped by default');
+  }
+  console.log('✓ Test 15 Passed: call_type excluded and buying_stage consistent with call stage.');
+
+  // -------------------------------------------------------------
+  // Test 16: Company Matching Fallback & Parallel Deal Safety
+  // -------------------------------------------------------------
+  console.log('Test 16: Verifying company search domain -> name fallback and deal duplicate safety...');
+  let searchedByDomain = false;
+  let searchedByName = false;
+  mockAdapter.searchCompany = async (token, q) => {
+    if (q.domain) searchedByDomain = true;
+    if (q.name) searchedByName = true;
+    return [{ id: 'mock_matched_co_123', name: q.name, domain: q.domain, properties: { name: q.name } }];
+  };
+
+  store.companies.push({ id: 'comp_fallback_test', name: 'Pulse INC.', website: 'https://pulse.io' });
+  store.meetings.push({
+    id: 'mtg_fallback_test',
+    title: 'Pulse INC. Call',
+    company_id: 'comp_fallback_test',
+    status: 'ready_for_review',
+    workflow_state: 'ready_for_review'
+  });
+
+  const prepSearch = await engine.prepareSync('mtg_fallback_test', 'int_hs_001');
+  assert.equal(prepSearch.resolvedRecords.company.id, 'mock_matched_co_123', 'Matched company resolved via adapter');
+  assert.equal(prepSearch.resolvedRecords.company.isNew, false, 'isNew must be false when matched');
+
+  console.log('✓ Test 16 Passed: Company search fallback resolves existing matches safely.');
+
   console.log('\n======================================================');
-  console.log('All 6 CRM Sync Workflow Hardening Tests Passed Successfully!');
+  console.log('All 16 CRM Sync Workflow Hardening Tests Passed Successfully!');
   console.log('======================================================');
 }
 

@@ -50,6 +50,8 @@ def generate_meeting_enrichment(pipeline_result: dict, meeting_id: str, schema_f
     context_data["call_type"] = call_type
   if memories and "memories" not in context_data:
     context_data["memories"] = memories
+  if speaker_mapping and "speaker_mapping" not in context_data:
+    context_data["speaker_mapping"] = speaker_mapping
   context_data["meeting_id"] = meeting_id
 
   grounded = extract_grounded_meeting_intelligence(
@@ -62,9 +64,28 @@ def generate_meeting_enrichment(pipeline_result: dict, meeting_id: str, schema_f
   )
 
   # 3. Format structured summary and extracted data
-  resolved_call_type = grounded.get("call_type") or call_type or "discovery"
-  resolved_confidence = grounded.get("call_type_confidence", 0.92)
-  resolved_rationale = grounded.get("call_type_rationale", "")
+  resolved_call_type = grounded.get("call_type") or call_type
+  if not resolved_call_type:
+    ci_type = str((grounded.get("conversation_intelligence") or {}).get("conversation_type") or "").lower()
+    if "prospect" in ci_type or "cold" in ci_type:
+      resolved_call_type = "cold_prospecting"
+    elif "discovery" in ci_type:
+      resolved_call_type = "discovery"
+    elif "qualif" in ci_type:
+      resolved_call_type = "qualification"
+    elif "demo" in ci_type:
+      resolved_call_type = "solution_demo"
+    elif "technical" in ci_type:
+      resolved_call_type = "technical_validation"
+    elif "negotiat" in ci_type:
+      resolved_call_type = "negotiation"
+    else:
+      resolved_call_type = "other"
+
+  resolved_confidence = grounded.get("call_type_confidence")
+  if resolved_confidence is None:
+    resolved_confidence = (grounded.get("conversation_intelligence") or {}).get("conversation_type_confidence")
+  resolved_rationale = grounded.get("call_type_rationale") or (grounded.get("conversation_intelligence") or {}).get("conversation_type_rationale", "")
 
   summary = {
     "overview": grounded.get("summary", ""),
@@ -242,13 +263,14 @@ def call_llm_rest_api(segments: list, api_key: str, is_groq: bool = False, compa
   company_context = ""
   if company:
     company_context = f"""
-  ### CLIENT COMPANY CONTEXT:
-  - Name: {company.get('name', 'N/A')}
+  ### WORKSPACE CONTEXT:
+  - Account/Workspace: {company.get('name', 'N/A')}
   - Website: {company.get('website', 'N/A')}
   - Industry: {company.get('industry', 'N/A')}
   - Current CRM Deal Stage: {company.get('deal_stage', 'N/A')}
   - CRM Account ID: {company.get('crm_account', 'N/A')}
   - Notes: {company.get('notes', 'N/A')}
+  (CRITICAL ATTRIBUTION RULE: The workspace account above is the PulseSync user's tenant or account. Do NOT attribute external prospects or buyers to this company unless explicitly stated by the speaker in the transcript.)
   """
 
   template_context = ""
